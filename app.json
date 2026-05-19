@@ -1,0 +1,24 @@
+{
+  "expo": {
+    "name": "RechnungGuard",
+    "slug": "rechnungguard",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#f7f4ee"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "extra": {
+      "eas": {
+        "projectId": "b921fc78-c175-480b-9795-71200c035859"
+      }
+    },
+    "owner": "jeylan"
+  }
+}
