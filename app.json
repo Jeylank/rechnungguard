@@ -14,6 +14,9 @@
     "ios": {
       "supportsTablet": true
     },
+    "android": {
+      "package": "com.rechnungguard.app"
+    },
     "extra": {
       "eas": {
         "projectId": "b921fc78-c175-480b-9795-71200c035859"
