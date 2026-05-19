@@ -3,10 +3,15 @@ export type DocumentType =
   | 'invoice'
   | 'medical_invoice'
   | 'dental_invoice'
+  | 'utility_bill'
+  | 'telecom_bill'
+  | 'rent_letter'
+  | 'insurance_document'
+  | 'government_letter'
+  | 'tax_letter'
   | 'payment_reminder'
   | 'inkasso_letter'
-  | 'insurance_document'
-  | 'payment_proof'
+  | 'subscription_bill'
   | 'unknown';
 
 export type PaymentStatus =
@@ -29,6 +34,7 @@ export type ScannedDocument = {
   paymentStatus: PaymentStatus;
   senderName: string;
   creditorName: string;
+  branchCategory: string;
   amountTotal: string;
   originalAmount: string;
   dueDate: string;
@@ -49,10 +55,15 @@ export const documentTypeValues: DocumentType[] = [
   'invoice',
   'medical_invoice',
   'dental_invoice',
+  'utility_bill',
+  'telecom_bill',
+  'rent_letter',
+  'insurance_document',
+  'government_letter',
+  'tax_letter',
   'payment_reminder',
   'inkasso_letter',
-  'insurance_document',
-  'payment_proof',
+  'subscription_bill',
   'unknown',
 ];
 
