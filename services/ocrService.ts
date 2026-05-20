@@ -11,7 +11,7 @@ export type OcrMode = 'mock' | 'backend';
 
 // Developer switch: set to 'backend' to test the local OCR backend from Expo Go.
 export const OCR_MODE: OcrMode = 'backend';
-export const BACKEND_OCR_URL = 'http://192.168.2.104:3001/ocr';
+export const BACKEND_OCR_URL = 'https://rechnungguard-ocr-695020261440.europe-west3.run.app/ocr';
 export const BACKEND_HEALTH_URL = BACKEND_OCR_URL.replace(/\/ocr\/?$/, '/health');
 
 const addDays = (days: number) => {
