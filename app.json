@@ -22,6 +22,9 @@
         "projectId": "b921fc78-c175-480b-9795-71200c035859"
       }
     },
-    "owner": "jeylan"
+    "owner": "jeylan",
+    "plugins": [
+      "expo-font"
+    ]
   }
 }

@@ -12,6 +12,7 @@ const withDocumentDefaults = (document: ScannedDocument): ScannedDocument => ({
   paymentMethod: document.paymentMethod ?? 'unknown',
   taxRelevant: document.taxRelevant ?? false,
   reimbursable: document.reimbursable ?? false,
+  ocrSource: document.ocrSource ?? 'fallback',
 });
 
 export const getDocuments = async (): Promise<ScannedDocument[]> => {

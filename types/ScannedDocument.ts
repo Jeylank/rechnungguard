@@ -43,6 +43,7 @@ export type ExpenseCategory =
 export type PaymentMethod = 'unknown' | 'bank_transfer' | 'direct_debit' | 'card' | 'cash' | 'paypal' | 'other';
 
 export type DueDateReminderKey = 'sevenDaysBefore' | 'threeDaysBefore' | 'dueDate';
+export type OcrSource = 'backend' | 'mock' | 'fallback';
 
 export type DueDateReminderState =
   | 'not_required'
@@ -89,6 +90,7 @@ export type ScannedDocument = {
   paymentMethod: PaymentMethod;
   taxRelevant: boolean;
   reimbursable: boolean;
+  ocrSource: OcrSource;
 };
 
 export const documentTypeValues: DocumentType[] = [

@@ -7,3 +7,4 @@ npm-debug.*
 yarn-debug.*
 yarn-error.*
 .DS_Store
+.env

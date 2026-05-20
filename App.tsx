@@ -23,7 +23,7 @@ import {
   translations,
 } from './i18n';
 import { getDocuments, upsertDocument } from './services/documentStorage';
-import { mockOcrDocument, OCR_MODE, scanDocumentWithOcr } from './services/ocrService';
+import { BACKEND_OCR_URL, OCR_MODE, scanDocumentWithOcr } from './services/ocrService';
 import {
   documentTypeValues,
   DocumentType,
@@ -31,11 +31,13 @@ import {
   expenseCategoryValues,
   inkassoChecklistItems,
   paymentStatusValues,
+  PaymentStatus,
   ScannedDocument,
   urgencyLevelValues,
 } from './types/ScannedDocument';
 
 type Screen = 'home' | 'scan' | 'review' | 'detail';
+type BackendStatus = 'checking' | 'reachable' | 'unreachable';
 type EditableField =
   | 'documentType'
   | 'paymentStatus'
@@ -247,8 +249,11 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>('home');
   const [documents, setDocuments] = useState<ScannedDocument[]>([]);
   const [draft, setDraft] = useState<ScannedDocument | null>(null);
+  const [selectedImageUri, setSelectedImageUri] = useState<string | null>(null);
   const [selectedDocument, setSelectedDocument] = useState<ScannedDocument | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isSavingStatus, setIsSavingStatus] = useState(false);
+  const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(null);
   const [language, setLanguage] = useState<Language>(defaultLanguage);
   const t = translations[language];
 
@@ -286,6 +291,34 @@ export default function App() {
   const recentDocuments = useMemo(() => documents.slice().sort(sortByDateDesc).slice(0, 8), [documents]);
   const expenseSummary = useMemo(() => getExpenseSummary(documents), [documents]);
 
+  useEffect(() => {
+    if (screen !== 'scan' || OCR_MODE !== 'backend') {
+      setBackendStatus(null);
+      return;
+    }
+
+    let isActive = true;
+    const checkBackendStatus = async () => {
+      setBackendStatus('checking');
+      try {
+        const response = await fetch(BACKEND_OCR_URL.replace(/\/ocr\/?$/, '/health'));
+        if (isActive) {
+          setBackendStatus(response.ok ? 'reachable' : 'unreachable');
+        }
+      } catch {
+        if (isActive) {
+          setBackendStatus('unreachable');
+        }
+      }
+    };
+
+    checkBackendStatus();
+
+    return () => {
+      isActive = false;
+    };
+  }, [screen]);
+
   const openDocument = (document: ScannedDocument) => {
     setSelectedDocument(document);
     setScreen('detail');
@@ -299,7 +332,40 @@ export default function App() {
     setScreen('detail');
   };
 
+  const updateDocumentStatus = async (status: Extract<PaymentStatus, 'paid' | 'disputed' | 'closed'>) => {
+    if (!selectedDocument?.id) {
+      Alert.alert(t.documentDetails, 'Kein Dokument ausgewahlt.');
+      return;
+    }
+
+    if (isSavingStatus) {
+      return;
+    }
+
+    setIsSavingStatus(true);
+    try {
+      const updatedDocument: ScannedDocument = {
+        ...selectedDocument,
+        paymentStatus: status,
+        paidDate: status === 'paid' ? todayIsoDate() : selectedDocument.paidDate,
+      };
+
+      const savedDocument = await upsertDocument(updatedDocument);
+      setSelectedDocument(savedDocument);
+      await loadDocuments();
+      Alert.alert(t.documentDetails, getPaymentStatusLabel(t, savedDocument.paymentStatus));
+    } catch (error) {
+      Alert.alert(t.documentDetails, 'Status konnte nicht gespeichert werden.');
+    } finally {
+      setIsSavingStatus(false);
+    }
+  };
+
   const chooseImage = async () => {
+    if (isLoading) {
+      return;
+    }
+
     const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permission.granted) {
       Alert.alert(t.permissionTitle, t.permissionMessage);
@@ -316,18 +382,32 @@ export default function App() {
       return;
     }
 
+    setSelectedImageUri(result.assets[0].uri);
+  };
+
+  const processSelectedImage = async () => {
+    if (!selectedImageUri || isLoading) {
+      return;
+    }
+
+    setDraft(null);
     setIsLoading(true);
     try {
-      const imageUri = result.assets[0].uri;
-      let document: ScannedDocument;
       try {
-        document = await scanDocumentWithOcr(imageUri);
-      } catch {
-        Alert.alert(t.ocrFailedTitle, t.ocrFailedManualReview);
-        document = await mockOcrDocument(imageUri);
+        const document = await scanDocumentWithOcr(selectedImageUri);
+        console.log('OCR source', document.ocrSource);
+        if (OCR_MODE === 'backend' && document.ocrSource !== 'backend') {
+          throw new Error('Backend OCR mode did not return backend data.');
+        }
+        setDraft(document);
+        setScreen('review');
+      } catch (error) {
+        console.log('OCR source', 'none');
+        console.error('OCR failed', error);
+        setDraft(null);
+        setScreen('scan');
+        Alert.alert(t.ocrFailedTitle, OCR_MODE === 'backend' ? t.backendOcrFailedNoRealData : t.ocrFailedManualReview);
       }
-      setDraft(document);
-      setScreen('review');
     } finally {
       setIsLoading(false);
     }
@@ -338,7 +418,12 @@ export default function App() {
       <StatusBar barStyle="dark-content" backgroundColor="#f7f4ee" />
       <View style={styles.appShell}>
         {screen !== 'home' ? (
-          <Pressable hitSlop={10} style={styles.backButton} onPress={() => setScreen('home')}>
+          <Pressable
+            disabled={isLoading}
+            hitSlop={10}
+            style={[styles.backButton, isLoading && styles.disabledButton]}
+            onPress={() => setScreen('home')}
+          >
             <Text style={styles.backButtonText}>{t.back}</Text>
           </Pressable>
         ) : null}
@@ -351,24 +436,38 @@ export default function App() {
             language={language}
             t={t}
             onChangeLanguage={changeLanguage}
-            onScan={() => setScreen('scan')}
+            onScan={() => {
+              setSelectedImageUri(null);
+              setDraft(null);
+              setScreen('scan');
+            }}
             onOpenDocument={openDocument}
           />
         ) : null}
 
         {screen === 'scan' ? (
-          <ScanScreen isLoading={isLoading} ocrMode={OCR_MODE} t={t} onPickImage={chooseImage} />
+          <ScanScreen
+            backendStatus={backendStatus}
+            imageUri={selectedImageUri}
+            isLoading={isLoading}
+            ocrMode={OCR_MODE}
+            t={t}
+            onPickImage={chooseImage}
+            onProcessImage={processSelectedImage}
+          />
         ) : null}
 
         {screen === 'review' && draft ? (
-          <ReviewScreen draft={draft} t={t} onChange={setDraft} onSave={() => saveDocument(draft)} />
+          <ReviewScreen draft={draft} ocrMode={OCR_MODE} t={t} onChange={setDraft} onSave={() => saveDocument(draft)} />
         ) : null}
 
         {screen === 'detail' && selectedDocument ? (
           <DetailScreen
             document={selectedDocument}
+            isSavingStatus={isSavingStatus}
             t={t}
             onChange={setSelectedDocument}
+            onUpdateStatus={updateDocumentStatus}
             onSave={async (document) => {
               const savedDocument = await upsertDocument(document);
               setSelectedDocument(savedDocument);
@@ -465,43 +564,89 @@ function HomeScreen({
 }
 
 function ScanScreen({
+  backendStatus,
+  imageUri,
   isLoading,
   ocrMode,
   t,
   onPickImage,
+  onProcessImage,
 }: {
+  backendStatus: BackendStatus | null;
+  imageUri: string | null;
   isLoading: boolean;
   ocrMode: typeof OCR_MODE;
   t: Translation;
   onPickImage: () => void;
+  onProcessImage: () => void;
 }) {
+  const statusText =
+    backendStatus === 'checking'
+      ? t.ocrPreparing
+      : backendStatus === 'reachable'
+        ? t.backendReachable
+        : backendStatus === 'unreachable'
+          ? t.backendUnreachable
+          : null;
+
   return (
-    <View style={styles.centerScreen}>
+    <ScrollView contentContainerStyle={styles.scanContent}>
       <Text style={styles.screenTitle}>{t.scanBillOrLetter}</Text>
-      <Text style={styles.modeBadge}>{t.ocrMode}: {ocrMode === 'backend' ? t.ocrModeBackend : t.ocrModeMock}</Text>
+      <View style={styles.statusBadgeGroup}>
+        <Text style={styles.modeBadge}>{t.ocrMode}: {ocrMode === 'backend' ? t.ocrModeBackend : t.ocrModeMock}</Text>
+        {statusText ? <Text style={styles.modeBadge}>{statusText}</Text> : null}
+      </View>
       <Text style={styles.subtleText}>{t.chooseImageHint}</Text>
       <Pressable disabled={isLoading} style={[styles.primaryButton, isLoading && styles.disabledButton]} onPress={onPickImage}>
-        <Text style={styles.primaryButtonText}>{isLoading ? t.scanning : t.pickImage}</Text>
+        <Text style={styles.primaryButtonText}>{imageUri ? t.changeImage : t.pickImage}</Text>
       </Pressable>
-      {isLoading ? <ActivityIndicator color="#0d5c63" size="large" style={styles.loader} /> : null}
-    </View>
+      {imageUri ? (
+        <>
+          <ImagePreview imageUri={imageUri} t={t} />
+          <Pressable
+            disabled={isLoading}
+            style={[styles.primaryButton, isLoading && styles.disabledButton]}
+            onPress={onProcessImage}
+          >
+            <Text style={styles.primaryButtonText}>{isLoading ? t.ocrRunning : t.processInvoice}</Text>
+          </Pressable>
+        </>
+      ) : null}
+      {isLoading ? (
+        <View style={styles.processingState}>
+          <ActivityIndicator color="#0d5c63" size="large" style={styles.loader} />
+          <Text style={styles.processingText}>{t.ocrRunning}</Text>
+        </View>
+      ) : null}
+    </ScrollView>
   );
 }
 
 function ReviewScreen({
   draft,
+  ocrMode,
   t,
   onChange,
   onSave,
 }: {
   draft: ScannedDocument;
+  ocrMode: typeof OCR_MODE;
   t: Translation;
   onChange: (document: ScannedDocument) => void;
   onSave: () => void;
 }) {
+  const sourceLabel =
+    draft.ocrSource === 'backend'
+      ? t.ocrSourceBackend
+      : draft.ocrSource === 'mock' && ocrMode === 'mock'
+        ? t.ocrSourceMock
+        : t.ocrSourceFallback;
+
   return (
     <ScrollView contentContainerStyle={styles.scrollContent}>
       <Text style={styles.screenTitle}>{t.reviewScan}</Text>
+      <Text style={[styles.modeBadge, styles.reviewSourceBadge]}>{sourceLabel}</Text>
+      {draft.ocrSource === 'fallback' ? <Text style={styles.fallbackWarning}>{t.fallbackMockWarning}</Text> : null}
       <ImagePreview imageUri={draft.imageUri} t={t} />
       <DocumentForm document={draft} t={t} onChange={onChange} />
       <ExpenseReviewFields document={draft} t={t} onChange={onChange} />
@@ -514,13 +659,17 @@ function ReviewScreen({
 
 function DetailScreen({
   document,
+  isSavingStatus,
   t,
   onChange,
+  onUpdateStatus,
   onSave,
 }: {
   document: ScannedDocument;
+  isSavingStatus: boolean;
   t: Translation;
   onChange: (document: ScannedDocument) => void;
+  onUpdateStatus: (status: Extract<PaymentStatus, 'paid' | 'disputed' | 'closed'>) => Promise<void>;
   onSave: (document: ScannedDocument) => Promise<void>;
 }) {
   const updateAndSave = async (updates: Partial<ScannedDocument>) => {
@@ -544,18 +693,9 @@ function DetailScreen({
       <ImagePreview imageUri={document.imageUri} t={t} />
 
       <View style={styles.actionRow}>
-        <Pressable
-          style={styles.secondaryButton}
-          onPress={() => updateAndSave({ paymentStatus: 'paid', paidDate: todayIsoDate() })}
-        >
-          <Text style={styles.secondaryButtonText}>{t.markAsPaid}</Text>
-        </Pressable>
-        <Pressable style={styles.secondaryButton} onPress={() => updateAndSave({ paymentStatus: 'disputed' })}>
-          <Text style={styles.secondaryButtonText}>{t.markAsDisputed}</Text>
-        </Pressable>
-        <Pressable style={styles.secondaryButton} onPress={() => updateAndSave({ paymentStatus: 'closed' })}>
-          <Text style={styles.secondaryButtonText}>{t.markAsClosed}</Text>
-        </Pressable>
+        <AppButton label={t.markAsPaid} disabled={isSavingStatus} onPress={() => onUpdateStatus('paid')} />
+        <AppButton label={t.markAsDisputed} disabled={isSavingStatus} onPress={() => onUpdateStatus('disputed')} />
+        <AppButton label={t.markAsClosed} disabled={isSavingStatus} onPress={() => onUpdateStatus('closed')} />
       </View>
 
       <Text style={styles.inputLabel}>{t.paymentNote}</Text>
@@ -620,6 +760,32 @@ function DetailScreen({
         </View>
       ) : null}
     </ScrollView>
+  );
+}
+
+function AppButton({
+  label,
+  disabled,
+  onPress,
+}: {
+  label: string;
+  disabled: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      android_ripple={{ color: '#d9e8e5' }}
+      disabled={disabled}
+      hitSlop={12}
+      style={({ pressed }) => [
+        styles.appButton,
+        pressed && !disabled && styles.appButtonPressed,
+        disabled && styles.disabledButton,
+      ]}
+      onPress={onPress}
+    >
+      <Text style={styles.appButtonText}>{label}</Text>
+    </Pressable>
   );
 }
 
@@ -982,6 +1148,32 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 7,
   },
+  reviewSourceBadge: {
+    alignSelf: 'flex-start',
+  },
+  fallbackWarning: {
+    backgroundColor: '#fff5d6',
+    borderColor: '#d7a018',
+    borderRadius: 8,
+    borderWidth: 1,
+    color: '#614600',
+    fontSize: 14,
+    fontWeight: '800',
+    marginBottom: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+  },
+  statusBadgeGroup: {
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 4,
+  },
+  scanContent: {
+    alignItems: 'center',
+    flexGrow: 1,
+    justifyContent: 'center',
+    paddingBottom: 36,
+  },
   centerScreen: {
     alignItems: 'center',
     flex: 1,
@@ -989,6 +1181,17 @@ const styles = StyleSheet.create({
   },
   loader: {
     marginTop: 10,
+  },
+  processingState: {
+    alignItems: 'center',
+    marginTop: 2,
+  },
+  processingText: {
+    color: '#536260',
+    fontSize: 14,
+    fontWeight: '700',
+    marginTop: 8,
+    textAlign: 'center',
   },
   documentRow: {
     alignItems: 'center',
@@ -1215,6 +1418,26 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 10,
     marginBottom: 18,
+  },
+  appButton: {
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    borderColor: '#0d5c63',
+    borderRadius: 8,
+    borderWidth: 1,
+    flex: 1,
+    justifyContent: 'center',
+    minHeight: 56,
+    minWidth: 104,
+    paddingHorizontal: 12,
+  },
+  appButtonPressed: {
+    backgroundColor: '#eef6f4',
+  },
+  appButtonText: {
+    color: '#0d5c63',
+    fontWeight: '800',
+    textAlign: 'center',
   },
   secondaryButton: {
     alignItems: 'center',

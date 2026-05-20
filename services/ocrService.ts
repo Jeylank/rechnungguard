@@ -10,7 +10,7 @@ import {
 export type OcrMode = 'mock' | 'backend';
 
 // Developer switch: set to 'backend' to test the local OCR backend from Expo Go.
-export const OCR_MODE: OcrMode = 'mock';
+export const OCR_MODE: OcrMode = 'backend';
 export const BACKEND_OCR_URL = 'http://192.168.2.104:3001/ocr';
 
 const addDays = (days: number) => {
@@ -68,7 +68,9 @@ type BackendOcrResponse = Partial<
     | 'taxRelevant'
     | 'reimbursable'
   >
->;
+> & {
+  ocrProvider?: 'openai' | 'mock';
+};
 
 const mockExamples: MockOcrExample[] = [
   {
@@ -235,6 +237,7 @@ export const mockOcrDocument = async (imageUri: string): Promise<ScannedDocument
     paymentMethod: 'unknown',
     taxRelevant: example.taxRelevant,
     reimbursable: example.reimbursable,
+    ocrSource: 'mock',
   };
 };
 
@@ -271,6 +274,7 @@ const mapBackendResponseToDocument = (imageUri: string, response: BackendOcrResp
     paymentMethod: isPaymentMethod(response.paymentMethod) ? response.paymentMethod : 'unknown',
     taxRelevant: booleanOrFalse(response.taxRelevant),
     reimbursable: booleanOrFalse(response.reimbursable),
+    ocrSource: 'backend',
   };
 };
 
@@ -288,23 +292,54 @@ const backendOcrDocument = async (imageUri: string): Promise<ScannedDocument> =>
     type: 'image/jpeg',
   } as unknown as Blob);
 
-  const response = await fetch(BACKEND_OCR_URL, {
-    method: 'POST',
-    body: formData,
-  });
+  let response: Response;
+  try {
+    response = await fetch(BACKEND_OCR_URL, {
+      method: 'POST',
+      body: formData,
+    });
+  } catch (error) {
+    console.log('backend response status', 'request_failed');
+    throw error;
+  }
+  console.log('backend response status', response.status);
 
   if (!response.ok) {
-    throw new Error(`OCR backend failed with status ${response.status}.`);
+    let failureReason = `OCR backend failed with status ${response.status}.`;
+    try {
+      const payload = (await response.json()) as { error?: unknown; details?: unknown };
+      const backendMessage =
+        typeof payload.error === 'string'
+          ? payload.error
+          : typeof payload.details === 'string'
+            ? payload.details
+            : '';
+      failureReason = backendMessage ? `${failureReason} ${backendMessage}` : failureReason;
+    } catch {
+      // Keep the status-based reason when the backend did not return JSON.
+    }
+    throw new Error(failureReason);
   }
 
   const payload = (await response.json()) as BackendOcrResponse;
-  return mapBackendResponseToDocument(imageUri, payload);
+  if (payload.ocrProvider === 'mock') {
+    throw new Error('OCR backend returned mock data while OCR_MODE is backend.');
+  }
+
+  const document = mapBackendResponseToDocument(imageUri, payload);
+  console.log('OCR source', document.ocrSource);
+  return document;
 };
 
 export const scanDocumentWithOcr = async (imageUri: string): Promise<ScannedDocument> => {
+  console.log('OCR_MODE', OCR_MODE);
+  console.log('BACKEND_OCR_URL', BACKEND_OCR_URL);
+
   if (OCR_MODE === 'backend') {
     return backendOcrDocument(imageUri);
   }
 
-  return mockOcrDocument(imageUri);
+  const document = await mockOcrDocument(imageUri);
+  console.log('OCR source', document.ocrSource);
+  return document;
 };
