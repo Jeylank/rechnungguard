@@ -23,7 +23,7 @@ import {
   translations,
 } from './i18n';
 import { getDocuments, upsertDocument } from './services/documentStorage';
-import { BACKEND_OCR_URL, OCR_MODE, scanDocumentWithOcr } from './services/ocrService';
+import { BACKEND_HEALTH_URL, BACKEND_OCR_URL, OCR_MODE, scanDocumentWithOcr } from './services/ocrService';
 import {
   documentTypeValues,
   DocumentType,
@@ -72,6 +72,14 @@ type ExpenseCategorySummary = {
 const unpaidStatuses = new Set(['needs_review', 'unpaid', 'sent_to_insurance', 'waiting_reimbursement']);
 const openExpenseStatuses = new Set<ScannedDocument['paymentStatus']>(['needs_review', 'unpaid']);
 const LANGUAGE_STORAGE_KEY = 'rechnungguard.language.v1';
+
+const getErrorMessage = (error: unknown) => {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
+};
 
 const fieldOrder: EditableField[] = [
   'documentType',
@@ -254,6 +262,8 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [isSavingStatus, setIsSavingStatus] = useState(false);
   const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(null);
+  const [backendHealthResult, setBackendHealthResult] = useState<string | null>(null);
+  const [lastOcrError, setLastOcrError] = useState<string | null>(null);
   const [language, setLanguage] = useState<Language>(defaultLanguage);
   const t = translations[language];
 
@@ -301,7 +311,7 @@ export default function App() {
     const checkBackendStatus = async () => {
       setBackendStatus('checking');
       try {
-        const response = await fetch(BACKEND_OCR_URL.replace(/\/ocr\/?$/, '/health'));
+        const response = await fetch(BACKEND_HEALTH_URL);
         if (isActive) {
           setBackendStatus(response.ok ? 'reachable' : 'unreachable');
         }
@@ -318,6 +328,22 @@ export default function App() {
       isActive = false;
     };
   }, [screen]);
+
+  const testBackendHealth = async () => {
+    setBackendHealthResult(`${t.backendHealthTesting}: ${BACKEND_HEALTH_URL}`);
+    setBackendStatus('checking');
+
+    try {
+      const response = await fetch(BACKEND_HEALTH_URL);
+      const responseText = await response.text();
+      setBackendStatus(response.ok ? 'reachable' : 'unreachable');
+      setBackendHealthResult(`GET ${BACKEND_HEALTH_URL} -> HTTP ${response.status}: ${responseText}`);
+    } catch (error) {
+      const errorMessage = getErrorMessage(error);
+      setBackendStatus('unreachable');
+      setBackendHealthResult(`GET ${BACKEND_HEALTH_URL} -> ${errorMessage}`);
+    }
+  };
 
   const openDocument = (document: ScannedDocument) => {
     setSelectedDocument(document);
@@ -391,6 +417,7 @@ export default function App() {
     }
 
     setDraft(null);
+    setLastOcrError(null);
     setIsLoading(true);
     try {
       try {
@@ -402,11 +429,16 @@ export default function App() {
         setDraft(document);
         setScreen('review');
       } catch (error) {
+        const errorMessage = getErrorMessage(error);
         console.log('OCR source', 'none');
         console.error('OCR failed', error);
         setDraft(null);
+        setLastOcrError(errorMessage);
         setScreen('scan');
-        Alert.alert(t.ocrFailedTitle, OCR_MODE === 'backend' ? t.backendOcrFailedNoRealData : t.ocrFailedManualReview);
+        Alert.alert(
+          t.ocrFailedTitle,
+          OCR_MODE === 'backend' ? `${t.backendOcrFailedNoRealData}\n\n${errorMessage}` : t.ocrFailedManualReview,
+        );
       }
     } finally {
       setIsLoading(false);
@@ -448,12 +480,15 @@ export default function App() {
         {screen === 'scan' ? (
           <ScanScreen
             backendStatus={backendStatus}
+            backendHealthResult={backendHealthResult}
             imageUri={selectedImageUri}
             isLoading={isLoading}
+            lastOcrError={lastOcrError}
             ocrMode={OCR_MODE}
             t={t}
             onPickImage={chooseImage}
             onProcessImage={processSelectedImage}
+            onTestBackend={testBackendHealth}
           />
         ) : null}
 
@@ -565,20 +600,26 @@ function HomeScreen({
 
 function ScanScreen({
   backendStatus,
+  backendHealthResult,
   imageUri,
   isLoading,
+  lastOcrError,
   ocrMode,
   t,
   onPickImage,
   onProcessImage,
+  onTestBackend,
 }: {
   backendStatus: BackendStatus | null;
+  backendHealthResult: string | null;
   imageUri: string | null;
   isLoading: boolean;
+  lastOcrError: string | null;
   ocrMode: typeof OCR_MODE;
   t: Translation;
   onPickImage: () => void;
   onProcessImage: () => void;
+  onTestBackend: () => void;
 }) {
   const statusText =
     backendStatus === 'checking'
@@ -596,6 +637,21 @@ function ScanScreen({
         <Text style={styles.modeBadge}>{t.ocrMode}: {ocrMode === 'backend' ? t.ocrModeBackend : t.ocrModeMock}</Text>
         {statusText ? <Text style={styles.modeBadge}>{statusText}</Text> : null}
       </View>
+      <View style={styles.debugBox}>
+        <Text style={styles.debugLabel}>{t.backendOcrUrl}</Text>
+        <Text selectable style={styles.debugValue}>{BACKEND_OCR_URL}</Text>
+        <Text style={styles.debugLabel}>{t.backendHealthUrl}</Text>
+        <Text selectable style={styles.debugValue}>{BACKEND_HEALTH_URL}</Text>
+        {backendHealthResult ? <Text selectable style={styles.debugResult}>{backendHealthResult}</Text> : null}
+        {lastOcrError ? <Text selectable style={styles.errorText}>{lastOcrError}</Text> : null}
+      </View>
+      <Pressable
+        disabled={isLoading}
+        style={[styles.scanTestButton, isLoading && styles.disabledButton]}
+        onPress={onTestBackend}
+      >
+        <Text style={styles.scanTestButtonText}>{t.testBackend}</Text>
+      </Pressable>
       <Text style={styles.subtleText}>{t.chooseImageHint}</Text>
       <Pressable disabled={isLoading} style={[styles.primaryButton, isLoading && styles.disabledButton]} onPress={onPickImage}>
         <Text style={styles.primaryButtonText}>{imageUri ? t.changeImage : t.pickImage}</Text>
@@ -1068,6 +1124,22 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
   },
+  scanTestButton: {
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    borderColor: '#0d5c63',
+    borderRadius: 8,
+    borderWidth: 1,
+    justifyContent: 'center',
+    marginBottom: 14,
+    minHeight: 48,
+    paddingHorizontal: 16,
+  },
+  scanTestButtonText: {
+    color: '#0d5c63',
+    fontSize: 15,
+    fontWeight: '800',
+  },
   disabledButton: {
     opacity: 0.65,
   },
@@ -1167,6 +1239,40 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
     marginBottom: 4,
+  },
+  debugBox: {
+    alignSelf: 'stretch',
+    backgroundColor: '#ffffff',
+    borderColor: '#bdc9c4',
+    borderRadius: 8,
+    borderWidth: 1,
+    marginBottom: 10,
+    padding: 12,
+  },
+  debugLabel: {
+    color: '#536260',
+    fontSize: 12,
+    fontWeight: '800',
+    marginBottom: 3,
+  },
+  debugValue: {
+    color: '#153433',
+    fontSize: 13,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  debugResult: {
+    color: '#153433',
+    fontSize: 13,
+    lineHeight: 18,
+    marginTop: 4,
+  },
+  errorText: {
+    color: '#9a2f1f',
+    fontSize: 13,
+    fontWeight: '800',
+    lineHeight: 18,
+    marginTop: 8,
   },
   scanContent: {
     alignItems: 'center',
