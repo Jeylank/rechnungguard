@@ -418,6 +418,6 @@ app.use((error, _request, response, _next) => {
   });
 });
 
-app.listen(port, () => {
+app.listen(port, '0.0.0.0', () => {
   console.log(`RechnungGuard OCR backend listening on port ${port}`);
 });
