@@ -25,6 +25,40 @@ export type PaymentStatus =
 
 export type UrgencyLevel = 'low' | 'medium' | 'high' | 'critical';
 
+export type ExpenseCategory =
+  | 'housing'
+  | 'energy'
+  | 'telecom'
+  | 'insurance'
+  | 'health'
+  | 'transport'
+  | 'shopping'
+  | 'subscriptions'
+  | 'tax_government'
+  | 'education'
+  | 'travel'
+  | 'legal'
+  | 'other';
+
+export type PaymentMethod = 'unknown' | 'bank_transfer' | 'direct_debit' | 'card' | 'cash' | 'paypal' | 'other';
+
+export type DueDateReminderKey = 'sevenDaysBefore' | 'threeDaysBefore' | 'dueDate';
+
+export type DueDateReminderState =
+  | 'not_required'
+  | 'permission_denied'
+  | 'scheduled'
+  | 'no_future_dates'
+  | 'failed'
+  | 'expo_go_limited';
+
+export type DueDateReminderStatus = {
+  state: DueDateReminderState;
+  notificationIds: Partial<Record<DueDateReminderKey, string>>;
+  scheduledFor: Partial<Record<DueDateReminderKey, string>>;
+  updatedAt: string;
+};
+
 export type ScannedDocument = {
   id: string;
   imageUri: string;
@@ -48,6 +82,13 @@ export type ScannedDocument = {
   urgencyLevel: UrgencyLevel;
   paymentNote: string;
   inkassoChecklist: Record<string, boolean>;
+  dueDateReminderStatus?: DueDateReminderStatus;
+  expenseCategory: ExpenseCategory;
+  isExpense: boolean;
+  paidDate: string;
+  paymentMethod: PaymentMethod;
+  taxRelevant: boolean;
+  reimbursable: boolean;
 };
 
 export const documentTypeValues: DocumentType[] = [
@@ -78,6 +119,32 @@ export const paymentStatusValues: PaymentStatus[] = [
 ];
 
 export const urgencyLevelValues: UrgencyLevel[] = ['low', 'medium', 'high', 'critical'];
+
+export const expenseCategoryValues: ExpenseCategory[] = [
+  'housing',
+  'energy',
+  'telecom',
+  'insurance',
+  'health',
+  'transport',
+  'shopping',
+  'subscriptions',
+  'tax_government',
+  'education',
+  'travel',
+  'legal',
+  'other',
+];
+
+export const paymentMethodValues: PaymentMethod[] = [
+  'unknown',
+  'bank_transfer',
+  'direct_debit',
+  'card',
+  'cash',
+  'paypal',
+  'other',
+];
 
 export const inkassoChecklistItems = [
   'Check original creditor',

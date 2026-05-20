@@ -23,10 +23,12 @@ import {
   translations,
 } from './i18n';
 import { getDocuments, upsertDocument } from './services/documentStorage';
-import { mockOcrDocument } from './services/ocrService';
+import { mockOcrDocument, OCR_MODE, scanDocumentWithOcr } from './services/ocrService';
 import {
   documentTypeValues,
   DocumentType,
+  ExpenseCategory,
+  expenseCategoryValues,
   inkassoChecklistItems,
   paymentStatusValues,
   ScannedDocument,
@@ -52,7 +54,21 @@ type EditableField =
   | 'documentLanguage'
   | 'urgencyLevel';
 
+type ExpenseSummary = {
+  openAmount: number;
+  paidAmountThisMonth: number;
+  openInvoiceCount: number;
+  categoryBreakdown: ExpenseCategorySummary[];
+};
+
+type ExpenseCategorySummary = {
+  category: ExpenseCategory;
+  openAmount: number;
+  paidAmountThisMonth: number;
+};
+
 const unpaidStatuses = new Set(['needs_review', 'unpaid', 'sent_to_insurance', 'waiting_reimbursement']);
+const openExpenseStatuses = new Set<ScannedDocument['paymentStatus']>(['needs_review', 'unpaid']);
 const LANGUAGE_STORAGE_KEY = 'rechnungguard.language.v1';
 
 const fieldOrder: EditableField[] = [
@@ -94,6 +110,11 @@ const getPaymentStatusLabel = (t: Translation, value: ScannedDocument['paymentSt
   t.paymentStatuses[value] ?? value;
 const getUrgencyLevelLabel = (t: Translation, value: ScannedDocument['urgencyLevel']) =>
   t.urgencyLevels[value] ?? value;
+const getExpenseCategoryLabel = (t: Translation, value: ScannedDocument['expenseCategory']) =>
+  t.expenseCategories[value] ?? value;
+const getPaymentMethodLabel = (t: Translation, value: ScannedDocument['paymentMethod']) =>
+  t.paymentMethods[value] ?? value;
+const getBooleanLabel = (t: Translation, value: boolean) => (value ? t.yes : t.no);
 
 const getDetailValue = (t: Translation, document: ScannedDocument, field: EditableField) => {
   if (field === 'documentType') {
@@ -106,6 +127,120 @@ const getDetailValue = (t: Translation, document: ScannedDocument, field: Editab
     return getUrgencyLevelLabel(t, document.urgencyLevel);
   }
   return String(document[field] ?? '') || '-';
+};
+
+const parseAmount = (value: string) => {
+  const normalizedValue = value
+    .replace(/[^\d,.-]/g, '')
+    .replace(/\.(?=\d{3}(?:\D|$))/g, '')
+    .replace(',', '.');
+  const amount = Number.parseFloat(normalizedValue);
+  return Number.isFinite(amount) ? amount : 0;
+};
+
+const formatEuro = (value: number) =>
+  new Intl.NumberFormat('de-DE', {
+    style: 'currency',
+    currency: 'EUR',
+  }).format(value);
+
+const isThisMonth = (value: string) => {
+  if (!value) {
+    return false;
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return false;
+  }
+
+  const now = new Date();
+  return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth();
+};
+
+const createEmptyCategoryBreakdown = (): ExpenseCategorySummary[] =>
+  expenseCategoryValues.map((category) => ({
+    category,
+    openAmount: 0,
+    paidAmountThisMonth: 0,
+  }));
+
+const getExpenseSummary = (documents: ScannedDocument[]): ExpenseSummary => {
+  const categoryBreakdown = createEmptyCategoryBreakdown();
+  const categoryByName = new Map(categoryBreakdown.map((item) => [item.category, item]));
+
+  return documents.reduce<ExpenseSummary>(
+    (summary, document) => {
+      if (document.isExpense === false) {
+        return summary;
+      }
+
+      const amount = parseAmount(document.amountTotal);
+      const categorySummary = categoryByName.get(document.expenseCategory) ?? categoryByName.get('other');
+
+      if (openExpenseStatuses.has(document.paymentStatus)) {
+        summary.openAmount += amount;
+        summary.openInvoiceCount += 1;
+        if (categorySummary) {
+          categorySummary.openAmount += amount;
+        }
+      }
+
+      if (document.paymentStatus === 'paid' && isThisMonth(document.paidDate)) {
+        summary.paidAmountThisMonth += amount;
+        if (categorySummary) {
+          categorySummary.paidAmountThisMonth += amount;
+        }
+      }
+
+      return summary;
+    },
+    { openAmount: 0, paidAmountThisMonth: 0, openInvoiceCount: 0, categoryBreakdown },
+  );
+};
+
+const todayIsoDate = () => new Date().toISOString().slice(0, 10);
+
+const reminderOrder = ['sevenDaysBefore', 'threeDaysBefore', 'dueDate'] as const;
+
+const formatReminderDate = (value?: string) => {
+  if (!value) {
+    return null;
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return date.toLocaleString('de-DE', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
+
+const getReminderStatusText = (t: Translation, document: ScannedDocument) => {
+  const status = document.dueDateReminderStatus;
+  if (!status) {
+    return t.remindersUnknown;
+  }
+
+  if (status.state === 'expo_go_limited') {
+    return t.reminderExpoGoLimited;
+  }
+
+  const scheduledDates = reminderOrder
+    .map((key) => formatReminderDate(status.scheduledFor[key]))
+    .filter((value): value is string => Boolean(value));
+
+  if (status.state === 'scheduled' && scheduledDates.length > 0) {
+    return `${t.remindersScheduled}: ${scheduledDates.join(', ')}`;
+  }
+
+  return t.reminderStates[status.state] ?? t.remindersUnknown;
 };
 
 export default function App() {
@@ -149,6 +284,7 @@ export default function App() {
   }), [documents]);
 
   const recentDocuments = useMemo(() => documents.slice().sort(sortByDateDesc).slice(0, 8), [documents]);
+  const expenseSummary = useMemo(() => getExpenseSummary(documents), [documents]);
 
   const openDocument = (document: ScannedDocument) => {
     setSelectedDocument(document);
@@ -182,7 +318,14 @@ export default function App() {
 
     setIsLoading(true);
     try {
-      const document = await mockOcrDocument(result.assets[0].uri);
+      const imageUri = result.assets[0].uri;
+      let document: ScannedDocument;
+      try {
+        document = await scanDocumentWithOcr(imageUri);
+      } catch {
+        Alert.alert(t.ocrFailedTitle, t.ocrFailedManualReview);
+        document = await mockOcrDocument(imageUri);
+      }
       setDraft(document);
       setScreen('review');
     } finally {
@@ -204,6 +347,7 @@ export default function App() {
           <HomeScreen
             urgentDocuments={urgentDocuments}
             recentDocuments={recentDocuments}
+            expenseSummary={expenseSummary}
             language={language}
             t={t}
             onChangeLanguage={changeLanguage}
@@ -212,7 +356,9 @@ export default function App() {
           />
         ) : null}
 
-        {screen === 'scan' ? <ScanScreen isLoading={isLoading} t={t} onPickImage={chooseImage} /> : null}
+        {screen === 'scan' ? (
+          <ScanScreen isLoading={isLoading} ocrMode={OCR_MODE} t={t} onPickImage={chooseImage} />
+        ) : null}
 
         {screen === 'review' && draft ? (
           <ReviewScreen draft={draft} t={t} onChange={setDraft} onSave={() => saveDocument(draft)} />
@@ -238,6 +384,7 @@ export default function App() {
 function HomeScreen({
   urgentDocuments,
   recentDocuments,
+  expenseSummary,
   language,
   t,
   onChangeLanguage,
@@ -246,6 +393,7 @@ function HomeScreen({
 }: {
   urgentDocuments: ScannedDocument[];
   recentDocuments: ScannedDocument[];
+  expenseSummary: ExpenseSummary;
   language: Language;
   t: Translation;
   onChangeLanguage: (language: Language) => void;
@@ -293,6 +441,8 @@ function HomeScreen({
         <Text style={styles.primaryButtonText}>{t.scanBillOrLetter}</Text>
       </Pressable>
 
+      <ExpenseSummarySection summary={expenseSummary} t={t} />
+
       <SectionTitle title={t.urgentUnpaidBills} />
       {urgentDocuments.length === 0 ? (
         <EmptyState text={t.noUrgentUnpaidBills} />
@@ -314,10 +464,21 @@ function HomeScreen({
   );
 }
 
-function ScanScreen({ isLoading, t, onPickImage }: { isLoading: boolean; t: Translation; onPickImage: () => void }) {
+function ScanScreen({
+  isLoading,
+  ocrMode,
+  t,
+  onPickImage,
+}: {
+  isLoading: boolean;
+  ocrMode: typeof OCR_MODE;
+  t: Translation;
+  onPickImage: () => void;
+}) {
   return (
     <View style={styles.centerScreen}>
       <Text style={styles.screenTitle}>{t.scanBillOrLetter}</Text>
+      <Text style={styles.modeBadge}>{t.ocrMode}: {ocrMode === 'backend' ? t.ocrModeBackend : t.ocrModeMock}</Text>
       <Text style={styles.subtleText}>{t.chooseImageHint}</Text>
       <Pressable disabled={isLoading} style={[styles.primaryButton, isLoading && styles.disabledButton]} onPress={onPickImage}>
         <Text style={styles.primaryButtonText}>{isLoading ? t.scanning : t.pickImage}</Text>
@@ -343,6 +504,7 @@ function ReviewScreen({
       <Text style={styles.screenTitle}>{t.reviewScan}</Text>
       <ImagePreview imageUri={draft.imageUri} t={t} />
       <DocumentForm document={draft} t={t} onChange={onChange} />
+      <ExpenseReviewFields document={draft} t={t} onChange={onChange} />
       <Pressable style={styles.primaryButton} onPress={onSave}>
         <Text style={styles.primaryButtonText}>{t.save}</Text>
       </Pressable>
@@ -382,11 +544,17 @@ function DetailScreen({
       <ImagePreview imageUri={document.imageUri} t={t} />
 
       <View style={styles.actionRow}>
-        <Pressable style={styles.secondaryButton} onPress={() => updateAndSave({ paymentStatus: 'paid' })}>
+        <Pressable
+          style={styles.secondaryButton}
+          onPress={() => updateAndSave({ paymentStatus: 'paid', paidDate: todayIsoDate() })}
+        >
           <Text style={styles.secondaryButtonText}>{t.markAsPaid}</Text>
         </Pressable>
         <Pressable style={styles.secondaryButton} onPress={() => updateAndSave({ paymentStatus: 'disputed' })}>
           <Text style={styles.secondaryButtonText}>{t.markAsDisputed}</Text>
+        </Pressable>
+        <Pressable style={styles.secondaryButton} onPress={() => updateAndSave({ paymentStatus: 'closed' })}>
+          <Text style={styles.secondaryButtonText}>{t.markAsClosed}</Text>
         </Pressable>
       </View>
 
@@ -399,6 +567,36 @@ function DetailScreen({
         placeholder={t.paymentNotePlaceholder}
         style={[styles.input, styles.noteInput]}
       />
+
+      <View style={styles.detailRow}>
+        <Text style={styles.detailLabel}>{t.reminders}</Text>
+        <Text style={styles.detailValue}>{getReminderStatusText(t, document)}</Text>
+      </View>
+
+      <View style={styles.detailRow}>
+        <Text style={styles.detailLabel}>{t.fields.isExpense}</Text>
+        <Text style={styles.detailValue}>{getBooleanLabel(t, document.isExpense)}</Text>
+      </View>
+      <View style={styles.detailRow}>
+        <Text style={styles.detailLabel}>{t.fields.expenseCategory}</Text>
+        <Text style={styles.detailValue}>{getExpenseCategoryLabel(t, document.expenseCategory)}</Text>
+      </View>
+      <View style={styles.detailRow}>
+        <Text style={styles.detailLabel}>{t.fields.paidDate}</Text>
+        <Text style={styles.detailValue}>{document.paidDate || '-'}</Text>
+      </View>
+      <View style={styles.detailRow}>
+        <Text style={styles.detailLabel}>{t.fields.paymentMethod}</Text>
+        <Text style={styles.detailValue}>{getPaymentMethodLabel(t, document.paymentMethod)}</Text>
+      </View>
+      <View style={styles.detailRow}>
+        <Text style={styles.detailLabel}>{t.fields.taxRelevant}</Text>
+        <Text style={styles.detailValue}>{getBooleanLabel(t, document.taxRelevant)}</Text>
+      </View>
+      <View style={styles.detailRow}>
+        <Text style={styles.detailLabel}>{t.fields.reimbursable}</Text>
+        <Text style={styles.detailValue}>{getBooleanLabel(t, document.reimbursable)}</Text>
+      </View>
 
       {fieldOrder.map((field) => (
         <View key={field} style={styles.detailRow}>
@@ -482,6 +680,122 @@ function DocumentForm({
           </View>
         );
       })}
+    </View>
+  );
+}
+
+function ExpenseSummarySection({ summary, t }: { summary: ExpenseSummary; t: Translation }) {
+  return (
+    <View style={styles.summarySection}>
+      <Text style={styles.sectionTitle}>{t.expenseSummary}</Text>
+      <View style={styles.summaryGrid}>
+        <SummaryTile label={t.openAmount} value={formatEuro(summary.openAmount)} />
+        <SummaryTile label={t.paidAmountThisMonth} value={formatEuro(summary.paidAmountThisMonth)} />
+        <SummaryTile label={t.openInvoiceCount} value={String(summary.openInvoiceCount)} />
+      </View>
+      <Text style={styles.categoryBreakdownTitle}>{t.categoryBreakdown}</Text>
+      <View style={styles.categoryBreakdownList}>
+        {summary.categoryBreakdown.map((item) => (
+          <View key={item.category} style={styles.categoryBreakdownRow}>
+            <Text style={styles.categoryBreakdownName}>{getExpenseCategoryLabel(t, item.category)}</Text>
+            <View style={styles.categoryBreakdownAmounts}>
+              <View style={styles.categoryMetric}>
+                <Text style={styles.categoryMetricLabel}>{t.categoryOpenAmount}</Text>
+                <Text
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.72}
+                  style={styles.categoryMetricValue}
+                >
+                  {formatEuro(item.openAmount)}
+                </Text>
+              </View>
+              <View style={styles.categoryMetric}>
+                <Text style={styles.categoryMetricLabel}>{t.categoryPaidAmountThisMonth}</Text>
+                <Text
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.72}
+                  style={styles.categoryMetricValue}
+                >
+                  {formatEuro(item.paidAmountThisMonth)}
+                </Text>
+              </View>
+            </View>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+function SummaryTile({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.summaryTile}>
+      <Text style={styles.summaryLabel}>{label}</Text>
+      <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72} style={styles.summaryValue}>
+        {value}
+      </Text>
+    </View>
+  );
+}
+
+function ExpenseReviewFields({
+  document,
+  t,
+  onChange,
+}: {
+  document: ScannedDocument;
+  t: Translation;
+  onChange: (document: ScannedDocument) => void;
+}) {
+  const toggleField = (field: 'taxRelevant' | 'reimbursable') => {
+    onChange({ ...document, [field]: !document[field], isExpense: true });
+  };
+
+  return (
+    <View>
+      <Text style={styles.sectionTitle}>{t.expenseSummary}</Text>
+      <View style={styles.inputGroup}>
+        <Text style={styles.inputLabel}>{t.fields.expenseCategory}</Text>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.pillScroller}
+          contentContainerStyle={styles.pillRow}
+        >
+          {expenseCategoryValues.map((option) => (
+            <Pressable
+              key={option}
+              style={[styles.pill, document.expenseCategory === option && styles.pillSelected]}
+              onPress={() => onChange({ ...document, expenseCategory: option, isExpense: true })}
+            >
+              <Text style={[styles.pillText, document.expenseCategory === option && styles.pillTextSelected]}>
+                {getExpenseCategoryLabel(t, option)}
+              </Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+      </View>
+
+      <View style={styles.toggleRow}>
+        <Pressable
+          style={[styles.toggleButton, document.taxRelevant && styles.pillSelected]}
+          onPress={() => toggleField('taxRelevant')}
+        >
+          <Text style={[styles.pillText, document.taxRelevant && styles.pillTextSelected]}>
+            {t.fields.taxRelevant}: {getBooleanLabel(t, document.taxRelevant)}
+          </Text>
+        </Pressable>
+        <Pressable
+          style={[styles.toggleButton, document.reimbursable && styles.pillSelected]}
+          onPress={() => toggleField('reimbursable')}
+        >
+          <Text style={[styles.pillText, document.reimbursable && styles.pillTextSelected]}>
+            {t.fields.reimbursable}: {getBooleanLabel(t, document.reimbursable)}
+          </Text>
+        </Pressable>
+      </View>
     </View>
   );
 }
@@ -656,6 +970,18 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     textAlign: 'center',
   },
+  modeBadge: {
+    backgroundColor: '#ffffff',
+    borderColor: '#bdc9c4',
+    borderRadius: 8,
+    borderWidth: 1,
+    color: '#153433',
+    fontSize: 13,
+    fontWeight: '800',
+    marginBottom: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
   centerScreen: {
     alignItems: 'center',
     flex: 1,
@@ -716,6 +1042,78 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     color: '#65716d',
+  },
+  summarySection: {
+    marginTop: 4,
+  },
+  summaryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  summaryTile: {
+    backgroundColor: '#ffffff',
+    borderColor: '#e5ddd1',
+    borderRadius: 8,
+    borderWidth: 1,
+    flexGrow: 1,
+    minHeight: 82,
+    minWidth: 146,
+    padding: 12,
+  },
+  summaryLabel: {
+    color: '#65716d',
+    fontSize: 12,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  summaryValue: {
+    color: '#153433',
+    fontSize: 22,
+    fontWeight: '800',
+  },
+  categoryBreakdownTitle: {
+    color: '#153433',
+    fontSize: 16,
+    fontWeight: '800',
+    marginBottom: 8,
+    marginTop: 14,
+  },
+  categoryBreakdownList: {
+    gap: 8,
+  },
+  categoryBreakdownRow: {
+    backgroundColor: '#ffffff',
+    borderColor: '#e5ddd1',
+    borderRadius: 8,
+    borderWidth: 1,
+    padding: 12,
+  },
+  categoryBreakdownName: {
+    color: '#153433',
+    fontSize: 15,
+    fontWeight: '800',
+    marginBottom: 8,
+  },
+  categoryBreakdownAmounts: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  categoryMetric: {
+    flexGrow: 1,
+    minWidth: 128,
+  },
+  categoryMetricLabel: {
+    color: '#65716d',
+    fontSize: 12,
+    fontWeight: '700',
+    marginBottom: 3,
+  },
+  categoryMetricValue: {
+    color: '#153433',
+    fontSize: 16,
+    fontWeight: '800',
   },
   previewFrame: {
     alignItems: 'center',
@@ -794,7 +1192,26 @@ const styles = StyleSheet.create({
   pillTextSelected: {
     color: '#ffffff',
   },
+  toggleRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 14,
+  },
+  toggleButton: {
+    backgroundColor: '#ffffff',
+    borderColor: '#bdc9c4',
+    borderRadius: 8,
+    borderWidth: 1,
+    flexGrow: 1,
+    minHeight: 46,
+    minWidth: 142,
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
   actionRow: {
+    flexWrap: 'wrap',
     flexDirection: 'row',
     gap: 10,
     marginBottom: 18,
@@ -807,6 +1224,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     flex: 1,
     justifyContent: 'center',
+    minWidth: 104,
     minHeight: 48,
     paddingHorizontal: 12,
   },

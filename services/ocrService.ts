@@ -1,4 +1,17 @@
-import { createEmptyInkassoChecklist, DocumentType, ScannedDocument } from '../types/ScannedDocument';
+import {
+  createEmptyInkassoChecklist,
+  documentTypeValues,
+  expenseCategoryValues,
+  paymentStatusValues,
+  ScannedDocument,
+  urgencyLevelValues,
+} from '../types/ScannedDocument';
+
+export type OcrMode = 'mock' | 'backend';
+
+// Developer switch: set to 'backend' to test the local OCR backend from Expo Go.
+export const OCR_MODE: OcrMode = 'mock';
+export const BACKEND_OCR_URL = 'http://192.168.2.104:3001/ocr';
 
 const addDays = (days: number) => {
   const date = new Date();
@@ -9,7 +22,7 @@ const addDays = (days: number) => {
 const makeId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
 type MockOcrExample = {
-  documentType: DocumentType;
+  documentType: ScannedDocument['documentType'];
   paymentStatus: ScannedDocument['paymentStatus'];
   senderName: string;
   creditorName: string;
@@ -24,7 +37,38 @@ type MockOcrExample = {
   bic: string;
   paymentReference: string;
   urgencyLevel: ScannedDocument['urgencyLevel'];
+  expenseCategory: ScannedDocument['expenseCategory'];
+  taxRelevant: boolean;
+  reimbursable: boolean;
 };
+
+type BackendOcrResponse = Partial<
+  Pick<
+    ScannedDocument,
+    | 'documentType'
+    | 'paymentStatus'
+    | 'senderName'
+    | 'creditorName'
+    | 'branchCategory'
+    | 'amountTotal'
+    | 'originalAmount'
+    | 'dueDate'
+    | 'invoiceDate'
+    | 'invoiceNumber'
+    | 'customerNumber'
+    | 'iban'
+    | 'bic'
+    | 'paymentReference'
+    | 'documentLanguage'
+    | 'urgencyLevel'
+    | 'expenseCategory'
+    | 'isExpense'
+    | 'paidDate'
+    | 'paymentMethod'
+    | 'taxRelevant'
+    | 'reimbursable'
+  >
+>;
 
 const mockExamples: MockOcrExample[] = [
   {
@@ -43,6 +87,9 @@ const mockExamples: MockOcrExample[] = [
     bic: 'COBADEFFXXX',
     paymentReference: 'SWB-2026-4819 KND-904218',
     urgencyLevel: 'medium',
+    expenseCategory: 'energy',
+    taxRelevant: false,
+    reimbursable: false,
   },
   {
     documentType: 'telecom_bill',
@@ -60,6 +107,9 @@ const mockExamples: MockOcrExample[] = [
     bic: 'INGDDEFFXXX',
     paymentReference: 'CT-2026-77314 CON-118204',
     urgencyLevel: 'high',
+    expenseCategory: 'telecom',
+    taxRelevant: false,
+    reimbursable: false,
   },
   {
     documentType: 'rent_letter',
@@ -77,6 +127,9 @@ const mockExamples: MockOcrExample[] = [
     bic: 'SOGEDEFFXXX',
     paymentReference: 'Nebenkosten NK-2026-0442',
     urgencyLevel: 'low',
+    expenseCategory: 'housing',
+    taxRelevant: false,
+    reimbursable: false,
   },
   {
     documentType: 'insurance_document',
@@ -94,6 +147,9 @@ const mockExamples: MockOcrExample[] = [
     bic: 'BYLADEM1001',
     paymentReference: 'SPV-2026-6190 POL-775201',
     urgencyLevel: 'medium',
+    expenseCategory: 'insurance',
+    taxRelevant: false,
+    reimbursable: true,
   },
   {
     documentType: 'inkasso_letter',
@@ -111,10 +167,37 @@ const mockExamples: MockOcrExample[] = [
     bic: 'INGDDEFFXXX',
     paymentReference: 'FC-2026-8821 AZ-440193',
     urgencyLevel: 'critical',
+    expenseCategory: 'legal',
+    taxRelevant: false,
+    reimbursable: false,
   },
 ];
 
 let nextMockExampleIndex = 0;
+
+const isDocumentType = (value: unknown): value is ScannedDocument['documentType'] =>
+  typeof value === 'string' && documentTypeValues.includes(value as ScannedDocument['documentType']);
+
+const isPaymentStatus = (value: unknown): value is ScannedDocument['paymentStatus'] =>
+  typeof value === 'string' && paymentStatusValues.includes(value as ScannedDocument['paymentStatus']);
+
+const isUrgencyLevel = (value: unknown): value is ScannedDocument['urgencyLevel'] =>
+  typeof value === 'string' && urgencyLevelValues.includes(value as ScannedDocument['urgencyLevel']);
+
+const isExpenseCategory = (value: unknown): value is ScannedDocument['expenseCategory'] =>
+  typeof value === 'string' && expenseCategoryValues.includes(value as ScannedDocument['expenseCategory']);
+
+const isPaymentMethod = (value: unknown): value is ScannedDocument['paymentMethod'] =>
+  value === 'unknown' ||
+  value === 'bank_transfer' ||
+  value === 'direct_debit' ||
+  value === 'card' ||
+  value === 'cash' ||
+  value === 'paypal' ||
+  value === 'other';
+
+const stringOrEmpty = (value: unknown) => (typeof value === 'string' ? value : '');
+const booleanOrFalse = (value: unknown) => (typeof value === 'boolean' ? value : false);
 
 export const mockOcrDocument = async (imageUri: string): Promise<ScannedDocument> => {
   await new Promise((resolve) => setTimeout(resolve, 900));
@@ -146,5 +229,82 @@ export const mockOcrDocument = async (imageUri: string): Promise<ScannedDocument
     urgencyLevel: example.urgencyLevel,
     paymentNote: '',
     inkassoChecklist: createEmptyInkassoChecklist(),
+    expenseCategory: example.expenseCategory,
+    isExpense: true,
+    paidDate: '',
+    paymentMethod: 'unknown',
+    taxRelevant: example.taxRelevant,
+    reimbursable: example.reimbursable,
   };
+};
+
+const mapBackendResponseToDocument = (imageUri: string, response: BackendOcrResponse): ScannedDocument => {
+  const now = new Date().toISOString();
+
+  return {
+    id: makeId(),
+    imageUri,
+    createdAt: now,
+    updatedAt: now,
+    documentType: isDocumentType(response.documentType) ? response.documentType : 'unknown',
+    paymentStatus: isPaymentStatus(response.paymentStatus) ? response.paymentStatus : 'needs_review',
+    senderName: stringOrEmpty(response.senderName),
+    creditorName: stringOrEmpty(response.creditorName),
+    branchCategory: stringOrEmpty(response.branchCategory),
+    amountTotal: stringOrEmpty(response.amountTotal),
+    originalAmount: stringOrEmpty(response.originalAmount),
+    dueDate: stringOrEmpty(response.dueDate),
+    invoiceDate: stringOrEmpty(response.invoiceDate),
+    invoiceNumber: stringOrEmpty(response.invoiceNumber),
+    customerNumber: stringOrEmpty(response.customerNumber),
+    iban: stringOrEmpty(response.iban),
+    bic: stringOrEmpty(response.bic),
+    paymentReference: stringOrEmpty(response.paymentReference),
+    documentLanguage: stringOrEmpty(response.documentLanguage) || 'de',
+    urgencyLevel: isUrgencyLevel(response.urgencyLevel) ? response.urgencyLevel : 'medium',
+    paymentNote: '',
+    inkassoChecklist: createEmptyInkassoChecklist(),
+    dueDateReminderStatus: undefined,
+    expenseCategory: isExpenseCategory(response.expenseCategory) ? response.expenseCategory : 'other',
+    isExpense: response.isExpense ?? true,
+    paidDate: stringOrEmpty(response.paidDate),
+    paymentMethod: isPaymentMethod(response.paymentMethod) ? response.paymentMethod : 'unknown',
+    taxRelevant: booleanOrFalse(response.taxRelevant),
+    reimbursable: booleanOrFalse(response.reimbursable),
+  };
+};
+
+const getFilenameFromUri = (imageUri: string) => imageUri.split('/').pop() || `rechnungguard-${Date.now()}.jpg`;
+
+const backendOcrDocument = async (imageUri: string): Promise<ScannedDocument> => {
+  if (!BACKEND_OCR_URL) {
+    throw new Error('BACKEND_OCR_URL is not configured.');
+  }
+
+  const formData = new FormData();
+  formData.append('image', {
+    uri: imageUri,
+    name: getFilenameFromUri(imageUri),
+    type: 'image/jpeg',
+  } as unknown as Blob);
+
+  const response = await fetch(BACKEND_OCR_URL, {
+    method: 'POST',
+    body: formData,
+  });
+
+  if (!response.ok) {
+    throw new Error(`OCR backend failed with status ${response.status}.`);
+  }
+
+  const payload = (await response.json()) as BackendOcrResponse;
+  return mapBackendResponseToDocument(imageUri, payload);
+};
+
+export const scanDocumentWithOcr = async (imageUri: string): Promise<ScannedDocument> => {
+  if (OCR_MODE === 'backend') {
+    return backendOcrDocument(imageUri);
+  }
+
+  return mockOcrDocument(imageUri);
 };
