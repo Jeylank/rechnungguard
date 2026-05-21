@@ -16,6 +16,7 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
 import * as ImagePicker from 'expo-image-picker';
+import QRCode from 'react-native-qrcode-svg';
 import {
   defaultLanguage,
   isLanguage,
@@ -23,8 +24,8 @@ import {
   Translation,
   translations,
 } from './i18n';
-import { getDocuments, upsertDocument } from './services/documentStorage';
-import { BACKEND_HEALTH_URL, BACKEND_OCR_URL, OCR_MODE, scanDocumentWithOcr } from './services/ocrService';
+import { deleteAllDocuments, deleteDocument, getDocuments, upsertDocument } from './services/documentStorage';
+import { BACKEND_HEALTH_URL, OCR_MODE, scanDocumentWithOcr } from './services/ocrService';
 import {
   documentTypeValues,
   DocumentType,
@@ -51,14 +52,21 @@ type EditableField =
   | 'amountTotal'
   | 'amountReceivable'
   | 'originalAmount'
+  | 'reminderFee'
+  | 'collectionFee'
   | 'dueDate'
   | 'expectedPaymentDate'
   | 'invoiceDate'
   | 'invoiceNumber'
   | 'customerNumber'
+  | 'reminderLevel'
+  | 'originalCreditorName'
+  | 'caseNumber'
   | 'iban'
   | 'bic'
   | 'paymentReference'
+  | 'riskNote'
+  | 'actionRecommendation'
   | 'documentLanguage'
   | 'urgencyLevel'
   | 'receivedDate';
@@ -82,15 +90,8 @@ const openExpenseStatuses = new Set<ScannedDocument['paymentStatus']>(['needs_re
 const receivableOpenStatuses = new Set<ScannedDocument['paymentStatus']>(['needs_review', 'expected', 'waiting_reimbursement']);
 const blockedPaymentPreparationStatuses = new Set<ScannedDocument['paymentStatus']>(['paid', 'closed']);
 const LANGUAGE_STORAGE_KEY = 'rechnungguard.language.v1';
-const ENABLE_BACKEND_DIAGNOSTICS = false;
-
-const getErrorMessage = (error: unknown) => {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return String(error);
-};
+const PRIVACY_NOTICE_ACCEPTED_STORAGE_KEY = 'rechnungguard.privacyNoticeAccepted.v1';
+const STORE_DOCUMENT_IMAGES_STORAGE_KEY = 'rechnungguard.storeDocumentImages.v1';
 
 const fieldOrder: EditableField[] = [
   'documentType',
@@ -103,14 +104,21 @@ const fieldOrder: EditableField[] = [
   'amountTotal',
   'amountReceivable',
   'originalAmount',
+  'reminderFee',
+  'collectionFee',
   'dueDate',
   'expectedPaymentDate',
   'invoiceDate',
   'invoiceNumber',
   'customerNumber',
+  'reminderLevel',
+  'originalCreditorName',
+  'caseNumber',
   'iban',
   'bic',
   'paymentReference',
+  'riskNote',
+  'actionRecommendation',
   'documentLanguage',
   'urgencyLevel',
   'receivedDate',
@@ -150,11 +158,37 @@ const getBooleanLabel = (t: Translation, value: boolean) => (value ? t.yes : t.n
 
 const copyToClipboard = (value: string) => Clipboard.setStringAsync(value);
 
+const isReminderOrInkassoDocument = (document: ScannedDocument) =>
+  document.documentType === 'payment_reminder' || document.documentType === 'inkasso_letter';
+
+const mentionsMahnbescheid = (document: ScannedDocument) =>
+  [
+    document.riskNote,
+    document.actionRecommendation,
+    document.reminderLevel,
+    document.branchCategory,
+    document.documentType,
+  ].some((value) => typeof value === 'string' && /mahnbescheid/i.test(value));
+
 const getPaymentRecipient = (document: ScannedDocument) =>
-  document.paymentRecipient || document.creditorName || document.senderName;
+  document.paymentRecipient || document.creditorName || document.senderName || '';
 
 const getPaymentReference = (document: ScannedDocument) =>
-  document.paymentReference || document.invoiceNumber || document.customerNumber;
+  document.paymentReference || document.invoiceNumber || document.customerNumber || '';
+
+const normalizeQrText = (value: string, maxLength: number) =>
+  value.replace(/[\r\n]+/g, ' ').trim().slice(0, maxLength);
+
+const normalizeIbanForQr = (value: string) => value.replace(/\s+/g, '').toUpperCase();
+
+const formatEpcAmount = (value: string) => {
+  const amount = parseAmount(value);
+  if (amount <= 0) {
+    return null;
+  }
+
+  return `EUR${amount.toFixed(2)}`;
+};
 
 const canPreparePayment = (document: ScannedDocument) => {
   if (document.documentType === 'payment_proof') {
@@ -170,6 +204,50 @@ const canPreparePayment = (document: ScannedDocument) => {
   }
 
   return Boolean(document.amountTotal);
+};
+
+const canGenerateSepaQr = (document: ScannedDocument) => {
+  if (document.cashflowType !== 'payable' && document.cashflowType !== 'unknown') {
+    return false;
+  }
+
+  if (blockedPaymentPreparationStatuses.has(document.paymentStatus)) {
+    return false;
+  }
+
+  return true;
+};
+
+const getSepaQrPayload = (document: ScannedDocument, recipient: string, paymentReference: string) => {
+  if (!canGenerateSepaQr(document)) {
+    return null;
+  }
+
+  const qrRecipient = normalizeQrText(recipient, 70);
+  const qrIban = normalizeIbanForQr(document.iban);
+  const qrAmount = formatEpcAmount(document.amountTotal);
+  if (!qrRecipient || !qrIban || !qrAmount) {
+    return null;
+  }
+
+  const qrBic = normalizeQrText(document.bic, 11);
+  const qrReference = normalizeQrText(paymentReference, 35);
+  const qrRemittanceText = normalizeQrText(paymentReference, 140);
+
+  return [
+    'BCD',
+    '002',
+    '1',
+    'SCT',
+    qrBic,
+    qrRecipient,
+    qrIban,
+    qrAmount,
+    '',
+    qrReference,
+    qrRemittanceText,
+    'RechnungGuard',
+  ].join('\n');
 };
 
 const getDetailValue = (t: Translation, document: ScannedDocument, field: EditableField) => {
@@ -322,9 +400,9 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [isSavingStatus, setIsSavingStatus] = useState(false);
   const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(null);
-  const [backendHealthResult, setBackendHealthResult] = useState<string | null>(null);
-  const [lastOcrError, setLastOcrError] = useState<string | null>(null);
   const [language, setLanguage] = useState<Language>(defaultLanguage);
+  const [privacyNoticeAccepted, setPrivacyNoticeAccepted] = useState(false);
+  const [storeDocumentImages, setStoreDocumentImages] = useState(false);
   const t = translations[language];
 
   const loadDocuments = useCallback(async () => {
@@ -347,9 +425,27 @@ export default function App() {
     loadLanguage();
   }, []);
 
+  useEffect(() => {
+    const loadPrivacySettings = async () => {
+      const [storedPrivacyNoticeAccepted, storedStoreDocumentImages] = await Promise.all([
+        AsyncStorage.getItem(PRIVACY_NOTICE_ACCEPTED_STORAGE_KEY),
+        AsyncStorage.getItem(STORE_DOCUMENT_IMAGES_STORAGE_KEY),
+      ]);
+      setPrivacyNoticeAccepted(storedPrivacyNoticeAccepted === 'true');
+      setStoreDocumentImages(storedStoreDocumentImages === 'true');
+    };
+
+    loadPrivacySettings();
+  }, []);
+
   const changeLanguage = async (nextLanguage: Language) => {
     setLanguage(nextLanguage);
     await AsyncStorage.setItem(LANGUAGE_STORAGE_KEY, nextLanguage);
+  };
+
+  const changeStoreDocumentImages = async (enabled: boolean) => {
+    setStoreDocumentImages(enabled);
+    await AsyncStorage.setItem(STORE_DOCUMENT_IMAGES_STORAGE_KEY, enabled ? 'true' : 'false');
   };
 
   const urgentDocuments = useMemo(() => documents.filter(isUrgent).sort((a, b) => {
@@ -389,33 +485,72 @@ export default function App() {
     };
   }, [screen]);
 
-  const testBackendHealth = async () => {
-    setBackendHealthResult(`${t.backendHealthTesting}: ${BACKEND_HEALTH_URL}`);
-    setBackendStatus('checking');
-
-    try {
-      const response = await fetch(BACKEND_HEALTH_URL);
-      const responseText = await response.text();
-      setBackendStatus(response.ok ? 'reachable' : 'unreachable');
-      setBackendHealthResult(`GET ${BACKEND_HEALTH_URL} -> HTTP ${response.status}: ${responseText}`);
-    } catch (error) {
-      const errorMessage = getErrorMessage(error);
-      setBackendStatus('unreachable');
-      setBackendHealthResult(`GET ${BACKEND_HEALTH_URL} -> ${errorMessage}`);
-    }
-  };
-
   const openDocument = (document: ScannedDocument) => {
     setSelectedDocument(document);
     setScreen('detail');
   };
 
   const saveDocument = async (document: ScannedDocument) => {
-    const savedDocument = await upsertDocument(document);
+    const savedDocument = await upsertDocument({
+      ...document,
+      imageUri: storeDocumentImages ? document.imageUri : '',
+    });
     setDraft(null);
     setSelectedDocument(savedDocument);
     await loadDocuments();
     setScreen('detail');
+  };
+
+  const confirmAction = (title: string, message: string) =>
+    new Promise<boolean>((resolve) => {
+      Alert.alert(title, message, [
+        { text: t.cancel, style: 'cancel', onPress: () => resolve(false) },
+        { text: t.delete, style: 'destructive', onPress: () => resolve(true) },
+      ]);
+    });
+
+  const confirmPrivacyNotice = () =>
+    new Promise<boolean>((resolve) => {
+      Alert.alert(t.privacyNoticeTitle, t.ocrPrivacyNotice, [
+        { text: t.cancel, style: 'cancel', onPress: () => resolve(false) },
+        { text: t.understood, onPress: () => resolve(true) },
+      ]);
+    });
+
+  const deleteSelectedDocument = async () => {
+    if (!selectedDocument?.id) {
+      return;
+    }
+
+    const confirmed = await confirmAction(t.deleteDocument, t.deleteDocumentConfirm);
+    if (!confirmed) {
+      return;
+    }
+
+    await deleteDocument(selectedDocument.id);
+    setSelectedDocument(null);
+    await loadDocuments();
+    setScreen('home');
+  };
+
+  const deleteAllLocalData = async () => {
+    const confirmed = await confirmAction(t.deleteAllLocalData, t.deleteAllLocalDataConfirm);
+    if (!confirmed) {
+      return;
+    }
+
+    await deleteAllDocuments();
+    await AsyncStorage.multiRemove([
+      PRIVACY_NOTICE_ACCEPTED_STORAGE_KEY,
+      STORE_DOCUMENT_IMAGES_STORAGE_KEY,
+    ]);
+    setDocuments([]);
+    setDraft(null);
+    setSelectedDocument(null);
+    setSelectedImageUri(null);
+    setPrivacyNoticeAccepted(false);
+    setStoreDocumentImages(false);
+    setScreen('home');
   };
 
   const updateDocumentStatus = async (status: Extract<PaymentStatus, 'expected' | 'paid' | 'received' | 'disputed' | 'closed'>) => {
@@ -477,24 +612,31 @@ export default function App() {
       return;
     }
 
+    if (!privacyNoticeAccepted) {
+      const confirmed = await confirmPrivacyNotice();
+      if (!confirmed) {
+        return;
+      }
+
+      setPrivacyNoticeAccepted(true);
+      await AsyncStorage.setItem(PRIVACY_NOTICE_ACCEPTED_STORAGE_KEY, 'true');
+    }
+
     setDraft(null);
-    setLastOcrError(null);
     setIsLoading(true);
     try {
       try {
         const document = await scanDocumentWithOcr(selectedImageUri);
-        console.log('OCR source', document.ocrSource);
         if (OCR_MODE === 'backend' && document.ocrSource !== 'backend') {
           throw new Error('Backend OCR mode did not return backend data.');
         }
-        setDraft(document);
+        setDraft({
+          ...document,
+          imageUri: storeDocumentImages ? document.imageUri : '',
+        });
         setScreen('review');
       } catch (error) {
-        const errorMessage = getErrorMessage(error);
-        console.log('OCR source', 'none');
-        console.error('OCR failed', error);
         setDraft(null);
-        setLastOcrError(ENABLE_BACKEND_DIAGNOSTICS ? errorMessage : null);
         setScreen('scan');
         Alert.alert(t.ocrFailedTitle, t.ocrFailedManualReview);
       }
@@ -524,8 +666,11 @@ export default function App() {
             recentDocuments={recentDocuments}
             expenseSummary={expenseSummary}
             language={language}
+            storeDocumentImages={storeDocumentImages}
             t={t}
             onChangeLanguage={changeLanguage}
+            onChangeStoreDocumentImages={changeStoreDocumentImages}
+            onDeleteAllLocalData={deleteAllLocalData}
             onScan={() => {
               setSelectedImageUri(null);
               setDraft(null);
@@ -538,16 +683,11 @@ export default function App() {
         {screen === 'scan' ? (
           <ScanScreen
             backendStatus={backendStatus}
-            backendHealthResult={backendHealthResult}
             imageUri={selectedImageUri}
             isLoading={isLoading}
-            lastOcrError={lastOcrError}
-            ocrMode={OCR_MODE}
-            showDeveloperDiagnostics={ENABLE_BACKEND_DIAGNOSTICS}
             t={t}
             onPickImage={chooseImage}
             onProcessImage={processSelectedImage}
-            onTestBackend={testBackendHealth}
           />
         ) : null}
 
@@ -568,9 +708,13 @@ export default function App() {
             t={t}
             onChange={setSelectedDocument}
             onPreparePayment={() => setScreen('paymentPreparation')}
+            onDeleteDocument={deleteSelectedDocument}
             onUpdateStatus={updateDocumentStatus}
             onSave={async (document) => {
-              const savedDocument = await upsertDocument(document);
+              const savedDocument = await upsertDocument({
+                ...document,
+                imageUri: storeDocumentImages ? document.imageUri : '',
+              });
               setSelectedDocument(savedDocument);
               await loadDocuments();
             }}
@@ -598,8 +742,11 @@ function HomeScreen({
   recentDocuments,
   expenseSummary,
   language,
+  storeDocumentImages,
   t,
   onChangeLanguage,
+  onChangeStoreDocumentImages,
+  onDeleteAllLocalData,
   onScan,
   onOpenDocument,
 }: {
@@ -607,8 +754,11 @@ function HomeScreen({
   recentDocuments: ScannedDocument[];
   expenseSummary: ExpenseSummary;
   language: Language;
+  storeDocumentImages: boolean;
   t: Translation;
   onChangeLanguage: (language: Language) => void;
+  onChangeStoreDocumentImages: (enabled: boolean) => void;
+  onDeleteAllLocalData: () => void;
   onScan: () => void;
   onOpenDocument: (document: ScannedDocument) => void;
 }) {
@@ -649,9 +799,30 @@ function HomeScreen({
         </View>
       </View>
 
+      <View style={styles.privacySettings}>
+        <View style={styles.settingRow}>
+          <View style={styles.settingTextBlock}>
+            <Text style={styles.inputLabel}>{t.storeDocumentImages}</Text>
+            <Text style={styles.settingHint}>{t.storeDocumentImagesHint}</Text>
+          </View>
+          <Pressable
+            accessibilityRole="switch"
+            accessibilityState={{ checked: storeDocumentImages }}
+            style={[styles.toggleButton, storeDocumentImages && styles.toggleButtonEnabled]}
+            onPress={() => onChangeStoreDocumentImages(!storeDocumentImages)}
+          >
+            <Text style={[styles.toggleButtonText, storeDocumentImages && styles.toggleButtonTextEnabled]}>
+              {storeDocumentImages ? t.on : t.off}
+            </Text>
+          </Pressable>
+        </View>
+      </View>
+
       <Pressable style={styles.primaryButton} onPress={onScan}>
         <Text style={styles.primaryButtonText}>{t.scanBillOrLetter}</Text>
       </Pressable>
+
+      <AppButton label={t.deleteAllLocalData} disabled={false} onPress={onDeleteAllLocalData} />
 
       <ExpenseSummarySection summary={expenseSummary} t={t} />
 
@@ -678,28 +849,18 @@ function HomeScreen({
 
 function ScanScreen({
   backendStatus,
-  backendHealthResult,
   imageUri,
   isLoading,
-  lastOcrError,
-  ocrMode,
-  showDeveloperDiagnostics,
   t,
   onPickImage,
   onProcessImage,
-  onTestBackend,
 }: {
   backendStatus: BackendStatus | null;
-  backendHealthResult: string | null;
   imageUri: string | null;
   isLoading: boolean;
-  lastOcrError: string | null;
-  ocrMode: typeof OCR_MODE;
-  showDeveloperDiagnostics: boolean;
   t: Translation;
   onPickImage: () => void;
   onProcessImage: () => void;
-  onTestBackend: () => void;
 }) {
   const statusText =
     backendStatus === 'checking'
@@ -716,27 +877,6 @@ function ScanScreen({
       <View style={styles.statusBadgeGroup}>
         {statusText ? <Text style={styles.modeBadge}>{statusText}</Text> : null}
       </View>
-      {showDeveloperDiagnostics ? (
-        <>
-          <View style={styles.debugBox}>
-            <Text style={styles.debugLabel}>{t.ocrMode}</Text>
-            <Text style={styles.debugValue}>{ocrMode === 'backend' ? t.ocrModeBackend : t.ocrModeMock}</Text>
-            <Text style={styles.debugLabel}>{t.backendOcrUrl}</Text>
-            <Text selectable style={styles.debugValue}>{BACKEND_OCR_URL}</Text>
-            <Text style={styles.debugLabel}>{t.backendHealthUrl}</Text>
-            <Text selectable style={styles.debugValue}>{BACKEND_HEALTH_URL}</Text>
-            {backendHealthResult ? <Text selectable style={styles.debugResult}>{backendHealthResult}</Text> : null}
-            {lastOcrError ? <Text selectable style={styles.errorText}>{lastOcrError}</Text> : null}
-          </View>
-          <Pressable
-            disabled={isLoading}
-            style={[styles.scanTestButton, isLoading && styles.disabledButton]}
-            onPress={onTestBackend}
-          >
-            <Text style={styles.scanTestButtonText}>{t.testBackend}</Text>
-          </Pressable>
-        </>
-      ) : null}
       <Text style={styles.subtleText}>{t.chooseImageHint}</Text>
       <Pressable disabled={isLoading} style={[styles.primaryButton, isLoading && styles.disabledButton]} onPress={onPickImage}>
         <Text style={styles.primaryButtonText}>{imageUri ? t.changeImage : t.pickImage}</Text>
@@ -804,6 +944,7 @@ function DetailScreen({
   t,
   onChange,
   onPreparePayment,
+  onDeleteDocument,
   onUpdateStatus,
   onSave,
 }: {
@@ -812,6 +953,7 @@ function DetailScreen({
   t: Translation;
   onChange: (document: ScannedDocument) => void;
   onPreparePayment: () => void;
+  onDeleteDocument: () => void;
   onUpdateStatus: (status: Extract<PaymentStatus, 'expected' | 'paid' | 'received' | 'disputed' | 'closed'>) => Promise<void>;
   onSave: (document: ScannedDocument) => Promise<void>;
 }) {
@@ -855,6 +997,7 @@ function DetailScreen({
         ) : null}
         <AppButton label={t.markAsDisputed} disabled={isSavingStatus} onPress={() => onUpdateStatus('disputed')} />
         <AppButton label={t.markAsClosed} disabled={isSavingStatus} onPress={() => onUpdateStatus('closed')} />
+        <AppButton label={t.deleteDocument} disabled={isSavingStatus} onPress={onDeleteDocument} />
       </View>
 
       {document.cashflowType === 'receivable' ? (
@@ -863,6 +1006,8 @@ function DetailScreen({
           <Text style={styles.receivableAmount}>{document.amountReceivable || document.amountTotal || '-'}</Text>
         </View>
       ) : null}
+
+      {isReminderOrInkassoDocument(document) ? <DebtRiskCard document={document} t={t} /> : null}
 
       <Text style={styles.inputLabel}>{t.paymentNote}</Text>
       <TextInput
@@ -942,6 +1087,14 @@ function PaymentPreparationScreen({
 }) {
   const recipient = getPaymentRecipient(document);
   const paymentReference = getPaymentReference(document);
+  const normalizedIban = normalizeIbanForQr(document.iban);
+  const epcAmount = formatEpcAmount(document.amountTotal);
+  const sepaQrPayload = getSepaQrPayload(document, recipient, paymentReference);
+  const sepaQrWarnings = [
+    !recipient ? t.sepaQrWarnings.missingRecipient : null,
+    !normalizedIban ? t.sepaQrWarnings.missingIban : null,
+    !document.amountTotal || !epcAmount ? t.sepaQrWarnings.missingAmount : null,
+  ].filter(Boolean) as string[];
   const warnings = [
     !document.iban ? t.paymentPreparationWarnings.missingIban : null,
     !document.amountTotal ? t.paymentPreparationWarnings.missingAmount : null,
@@ -962,6 +1115,7 @@ function PaymentPreparationScreen({
     <ScrollView contentContainerStyle={styles.scrollContent}>
       <Text style={styles.screenTitle}>{t.paymentPreparationTitle}</Text>
       <Text style={styles.paymentSafetyNote}>{t.paymentPreparationSafetyNote}</Text>
+      <Text style={styles.paymentSafetyNote}>{t.sepaQrDisclaimer}</Text>
 
       <View style={styles.paymentPreparationPanel}>
         <PaymentPreparationRow label={t.paymentTransferLabels.recipient} value={recipient} />
@@ -1002,8 +1156,22 @@ function PaymentPreparationScreen({
         ))}
       </View>
 
-      <View style={styles.sepaQrPlaceholder}>
-        <Text style={styles.sepaQrPlaceholderText}>{t.sepaQrComing}</Text>
+      <View style={styles.sepaQrSection}>
+        <Text style={styles.sectionTitle}>{t.sepaQrTitle}</Text>
+        <Text style={styles.paymentSafetyNote}>{t.sepaQrHelperText}</Text>
+        {sepaQrPayload ? (
+          <View style={styles.sepaQrCodeBox}>
+            <QRCode value={sepaQrPayload} size={220} backgroundColor="#ffffff" color="#153433" />
+          </View>
+        ) : (
+          <View style={styles.warningList}>
+            {sepaQrWarnings.map((warning) => (
+              <Text key={warning} style={styles.warningText}>
+                {warning}
+              </Text>
+            ))}
+          </View>
+        )}
       </View>
 
       <Pressable
@@ -1014,6 +1182,35 @@ function PaymentPreparationScreen({
         <Text style={styles.primaryButtonText}>{t.markAsPaid}</Text>
       </Pressable>
     </ScrollView>
+  );
+}
+
+function DebtRiskCard({ document, t }: { document: ScannedDocument; t: Translation }) {
+  const fees = [document.reminderFee, document.collectionFee].filter(Boolean).join(' / ');
+  const hasCriticalDeadline = document.urgencyLevel === 'critical';
+  const mahnbescheidMentioned = mentionsMahnbescheid(document);
+
+  return (
+    <View style={styles.debtRiskCard}>
+      <Text style={styles.debtRiskTitle}>{t.debtRiskTitle}</Text>
+      <DebtRiskRow label={t.debtRiskLabels.criticalDeadline} value={hasCriticalDeadline ? t.yes : t.no} />
+      <DebtRiskRow label={t.debtRiskLabels.mahnbescheidMentioned} value={mahnbescheidMentioned ? t.yes : t.no} />
+      <DebtRiskRow label={t.debtRiskLabels.originalAmount} value={document.originalAmount} />
+      <DebtRiskRow label={t.debtRiskLabels.fees} value={fees} />
+      <DebtRiskRow label={t.debtRiskLabels.caseNumber} value={document.caseNumber} />
+      <DebtRiskRow label={t.debtRiskLabels.originalCreditor} value={document.originalCreditorName} />
+      <DebtRiskRow label={t.debtRiskLabels.nextSteps} value={document.actionRecommendation || document.riskNote} multiline />
+      <Text style={styles.debtRiskDisclaimer}>{t.debtRiskDisclaimer}</Text>
+    </View>
+  );
+}
+
+function DebtRiskRow({ label, value, multiline }: { label: string; value: string; multiline?: boolean }) {
+  return (
+    <View style={styles.debtRiskRow}>
+      <Text style={styles.debtRiskLabel}>{label}</Text>
+      <Text style={[styles.debtRiskValue, multiline && styles.debtRiskValueMultiline]}>{value || '-'}</Text>
+    </View>
   );
 }
 
@@ -1352,22 +1549,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
   },
-  scanTestButton: {
-    alignItems: 'center',
-    backgroundColor: '#ffffff',
-    borderColor: '#0d5c63',
-    borderRadius: 8,
-    borderWidth: 1,
-    justifyContent: 'center',
-    marginBottom: 14,
-    minHeight: 48,
-    paddingHorizontal: 16,
-  },
-  scanTestButtonText: {
-    color: '#0d5c63',
-    fontSize: 15,
-    fontWeight: '800',
-  },
   disabledButton: {
     opacity: 0.65,
   },
@@ -1397,6 +1578,48 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   languageButtonTextSelected: {
+    color: '#ffffff',
+  },
+  privacySettings: {
+    marginBottom: 12,
+  },
+  settingRow: {
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    borderColor: '#e5ddd1',
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 12,
+    justifyContent: 'space-between',
+    padding: 12,
+  },
+  settingTextBlock: {
+    flex: 1,
+  },
+  settingHint: {
+    color: '#65716d',
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  toggleButton: {
+    alignItems: 'center',
+    borderColor: '#bdc9c4',
+    borderRadius: 8,
+    borderWidth: 1,
+    minWidth: 58,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  toggleButtonEnabled: {
+    backgroundColor: '#0d5c63',
+    borderColor: '#0d5c63',
+  },
+  toggleButtonText: {
+    color: '#153433',
+    fontWeight: '800',
+  },
+  toggleButtonTextEnabled: {
     color: '#ffffff',
   },
   backButton: {
@@ -1473,40 +1696,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 8,
     marginBottom: 4,
-  },
-  debugBox: {
-    alignSelf: 'stretch',
-    backgroundColor: '#ffffff',
-    borderColor: '#bdc9c4',
-    borderRadius: 8,
-    borderWidth: 1,
-    marginBottom: 10,
-    padding: 12,
-  },
-  debugLabel: {
-    color: '#536260',
-    fontSize: 12,
-    fontWeight: '800',
-    marginBottom: 3,
-  },
-  debugValue: {
-    color: '#153433',
-    fontSize: 13,
-    fontWeight: '700',
-    marginBottom: 8,
-  },
-  debugResult: {
-    color: '#153433',
-    fontSize: 13,
-    lineHeight: 18,
-    marginTop: 4,
-  },
-  errorText: {
-    color: '#9a2f1f',
-    fontSize: 13,
-    fontWeight: '800',
-    lineHeight: 18,
-    marginTop: 8,
   },
   scanContent: {
     alignItems: 'center',
@@ -1828,6 +2017,46 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: '800',
   },
+  debtRiskCard: {
+    backgroundColor: '#fff7e8',
+    borderColor: '#b34832',
+    borderRadius: 8,
+    borderWidth: 1,
+    marginBottom: 14,
+    padding: 14,
+  },
+  debtRiskTitle: {
+    color: '#7a2619',
+    fontSize: 18,
+    fontWeight: '800',
+    marginBottom: 10,
+  },
+  debtRiskRow: {
+    borderTopColor: '#eed5b5',
+    borderTopWidth: 1,
+    paddingVertical: 9,
+  },
+  debtRiskLabel: {
+    color: '#7a2619',
+    fontSize: 13,
+    fontWeight: '800',
+    marginBottom: 3,
+  },
+  debtRiskValue: {
+    color: '#153433',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  debtRiskValueMultiline: {
+    lineHeight: 21,
+  },
+  debtRiskDisclaimer: {
+    color: '#6b4608',
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 19,
+    marginTop: 8,
+  },
   paymentPreparationPanel: {
     backgroundColor: '#ffffff',
     borderColor: '#e5ddd1',
@@ -1861,22 +2090,18 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     padding: 12,
   },
-  sepaQrPlaceholder: {
+  sepaQrSection: {
+    marginBottom: 8,
+  },
+  sepaQrCodeBox: {
     alignItems: 'center',
     backgroundColor: '#ffffff',
-    borderColor: '#bdc9c4',
+    borderColor: '#e5ddd1',
     borderRadius: 8,
-    borderStyle: 'dashed',
     borderWidth: 1,
     justifyContent: 'center',
-    marginBottom: 8,
-    minHeight: 96,
-    padding: 16,
-  },
-  sepaQrPlaceholderText: {
-    color: '#536260',
-    fontSize: 16,
-    fontWeight: '800',
+    marginBottom: 14,
+    padding: 18,
   },
   checklist: {
     marginTop: 4,

@@ -78,11 +78,16 @@ export type ScannedDocument = {
   amountTotal: string;
   amountReceivable: string;
   originalAmount: string;
+  reminderFee: string;
+  collectionFee: string;
   dueDate: string;
   expectedPaymentDate: string;
   invoiceDate: string;
   invoiceNumber: string;
   customerNumber: string;
+  reminderLevel: string;
+  originalCreditorName: string;
+  caseNumber: string;
   iban: string;
   bic: string;
   paymentReference: string;
@@ -101,6 +106,8 @@ export type ScannedDocument = {
   reimbursable: boolean;
   cashflowType: CashflowType;
   ocrSource: OcrSource;
+  riskNote: string;
+  actionRecommendation: string;
 };
 
 export const documentTypeValues: DocumentType[] = [

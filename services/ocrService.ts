@@ -33,11 +33,16 @@ type MockOcrExample = {
   amountTotal: string;
   amountReceivable: string;
   originalAmount: string;
+  reminderFee: string;
+  collectionFee: string;
   dueInDays: number;
   expectedPaymentInDays: number;
   invoiceAgeDays: number;
   invoiceNumber: string;
   customerNumber: string;
+  reminderLevel: string;
+  originalCreditorName: string;
+  caseNumber: string;
   iban: string;
   bic: string;
   paymentReference: string;
@@ -46,6 +51,8 @@ type MockOcrExample = {
   taxRelevant: boolean;
   reimbursable: boolean;
   cashflowType: ScannedDocument['cashflowType'];
+  riskNote: string;
+  actionRecommendation: string;
 };
 
 type BackendOcrResponse = Partial<
@@ -60,11 +67,16 @@ type BackendOcrResponse = Partial<
     | 'amountTotal'
     | 'amountReceivable'
     | 'originalAmount'
+    | 'reminderFee'
+    | 'collectionFee'
     | 'dueDate'
     | 'expectedPaymentDate'
     | 'invoiceDate'
     | 'invoiceNumber'
     | 'customerNumber'
+    | 'reminderLevel'
+    | 'originalCreditorName'
+    | 'caseNumber'
     | 'iban'
     | 'bic'
     | 'paymentReference'
@@ -79,6 +91,8 @@ type BackendOcrResponse = Partial<
     | 'reimbursable'
     | 'cashflowType'
     | 'receivedDate'
+    | 'riskNote'
+    | 'actionRecommendation'
   >
 > & {
   ocrProvider?: 'openai' | 'mock';
@@ -95,11 +109,16 @@ const mockExamples: MockOcrExample[] = [
     amountTotal: '132,40 EUR',
     amountReceivable: '',
     originalAmount: '132,40 EUR',
+    reminderFee: '',
+    collectionFee: '',
     dueInDays: 9,
     expectedPaymentInDays: 0,
     invoiceAgeDays: 5,
     invoiceNumber: 'SWB-2026-4819',
     customerNumber: 'KND-904218',
+    reminderLevel: '',
+    originalCreditorName: '',
+    caseNumber: '',
     iban: 'DE89370400440532013000',
     bic: 'COBADEFFXXX',
     paymentReference: 'SWB-2026-4819 KND-904218',
@@ -108,6 +127,8 @@ const mockExamples: MockOcrExample[] = [
     taxRelevant: false,
     reimbursable: false,
     cashflowType: 'payable',
+    riskNote: '',
+    actionRecommendation: '',
   },
   {
     documentType: 'telecom_bill',
@@ -119,11 +140,16 @@ const mockExamples: MockOcrExample[] = [
     amountTotal: '49,95 EUR',
     amountReceivable: '',
     originalAmount: '49,95 EUR',
+    reminderFee: '',
+    collectionFee: '',
     dueInDays: 6,
     expectedPaymentInDays: 0,
     invoiceAgeDays: 8,
     invoiceNumber: 'CT-2026-77314',
     customerNumber: 'CON-118204',
+    reminderLevel: '',
+    originalCreditorName: '',
+    caseNumber: '',
     iban: 'DE12500105170648489890',
     bic: 'INGDDEFFXXX',
     paymentReference: 'CT-2026-77314 CON-118204',
@@ -132,6 +158,8 @@ const mockExamples: MockOcrExample[] = [
     taxRelevant: false,
     reimbursable: false,
     cashflowType: 'payable',
+    riskNote: '',
+    actionRecommendation: '',
   },
   {
     documentType: 'rent_letter',
@@ -143,11 +171,16 @@ const mockExamples: MockOcrExample[] = [
     amountTotal: '18,70 EUR',
     amountReceivable: '',
     originalAmount: '18,70 EUR',
+    reminderFee: '',
+    collectionFee: '',
     dueInDays: 14,
     expectedPaymentInDays: 0,
     invoiceAgeDays: 3,
     invoiceNumber: 'NK-2026-0442',
     customerNumber: 'MV-30291',
+    reminderLevel: '',
+    originalCreditorName: '',
+    caseNumber: '',
     iban: 'DE75512108001245126199',
     bic: 'SOGEDEFFXXX',
     paymentReference: 'Nebenkosten NK-2026-0442',
@@ -156,6 +189,8 @@ const mockExamples: MockOcrExample[] = [
     taxRelevant: false,
     reimbursable: false,
     cashflowType: 'payable',
+    riskNote: '',
+    actionRecommendation: '',
   },
   {
     documentType: 'insurance_document',
@@ -167,11 +202,16 @@ const mockExamples: MockOcrExample[] = [
     amountTotal: '86,30 EUR',
     amountReceivable: '',
     originalAmount: '86,30 EUR',
+    reminderFee: '',
+    collectionFee: '',
     dueInDays: 12,
     expectedPaymentInDays: 0,
     invoiceAgeDays: 4,
     invoiceNumber: 'SPV-2026-6190',
     customerNumber: 'POL-775201',
+    reminderLevel: '',
+    originalCreditorName: '',
+    caseNumber: '',
     iban: 'DE02120300000000202051',
     bic: 'BYLADEM1001',
     paymentReference: 'SPV-2026-6190 POL-775201',
@@ -180,6 +220,8 @@ const mockExamples: MockOcrExample[] = [
     taxRelevant: false,
     reimbursable: true,
     cashflowType: 'payable',
+    riskNote: '',
+    actionRecommendation: '',
   },
   {
     documentType: 'inkasso_letter',
@@ -191,11 +233,16 @@ const mockExamples: MockOcrExample[] = [
     amountTotal: '164,85 EUR',
     amountReceivable: '',
     originalAmount: '119,90 EUR',
+    reminderFee: '5,00 EUR',
+    collectionFee: '39,95 EUR',
     dueInDays: 5,
     expectedPaymentInDays: 0,
     invoiceAgeDays: 21,
     invoiceNumber: 'FC-2026-8821',
     customerNumber: 'AZ-440193',
+    reminderLevel: 'Inkasso',
+    originalCreditorName: 'ConnectTel GmbH',
+    caseNumber: 'AZ-440193',
     iban: 'DE44500105175407324931',
     bic: 'INGDDEFFXXX',
     paymentReference: 'FC-2026-8821 AZ-440193',
@@ -204,6 +251,8 @@ const mockExamples: MockOcrExample[] = [
     taxRelevant: false,
     reimbursable: false,
     cashflowType: 'payable',
+    riskNote: 'Inkasso-Forderung mit kurzer Frist.',
+    actionRecommendation: 'Forderung, ursprünglichen Gläubiger, Aktenzeichen und Gebühren prüfen; bei Unsicherheit Beratung kontaktieren.',
   },
   {
     documentType: 'tax_letter',
@@ -215,11 +264,16 @@ const mockExamples: MockOcrExample[] = [
     amountTotal: '',
     amountReceivable: '248,10 EUR',
     originalAmount: '',
+    reminderFee: '',
+    collectionFee: '',
     dueInDays: 0,
     expectedPaymentInDays: 10,
     invoiceAgeDays: 2,
     invoiceNumber: 'EST-2026-5521',
     customerNumber: 'StNr. 12/345/67890',
+    reminderLevel: '',
+    originalCreditorName: '',
+    caseNumber: '',
     iban: '',
     bic: '',
     paymentReference: 'Steuererstattung 2026',
@@ -228,6 +282,8 @@ const mockExamples: MockOcrExample[] = [
     taxRelevant: true,
     reimbursable: false,
     cashflowType: 'receivable',
+    riskNote: '',
+    actionRecommendation: '',
   },
 ];
 
@@ -281,11 +337,16 @@ export const mockOcrDocument = async (imageUri: string): Promise<ScannedDocument
     amountTotal: example.amountTotal,
     amountReceivable: example.amountReceivable,
     originalAmount: example.originalAmount,
+    reminderFee: example.reminderFee,
+    collectionFee: example.collectionFee,
     dueDate: addDays(example.dueInDays),
     expectedPaymentDate: example.expectedPaymentInDays ? addDays(example.expectedPaymentInDays) : '',
     invoiceDate: addDays(-example.invoiceAgeDays),
     invoiceNumber: example.invoiceNumber,
     customerNumber: example.customerNumber,
+    reminderLevel: example.reminderLevel,
+    originalCreditorName: example.originalCreditorName,
+    caseNumber: example.caseNumber,
     iban: example.iban,
     bic: example.bic,
     paymentReference: example.paymentReference,
@@ -302,6 +363,8 @@ export const mockOcrDocument = async (imageUri: string): Promise<ScannedDocument
     reimbursable: example.reimbursable,
     cashflowType: example.cashflowType,
     ocrSource: 'mock',
+    riskNote: example.riskNote,
+    actionRecommendation: example.actionRecommendation,
   };
 };
 
@@ -322,11 +385,16 @@ const mapBackendResponseToDocument = (imageUri: string, response: BackendOcrResp
     amountTotal: stringOrEmpty(response.amountTotal),
     amountReceivable: stringOrEmpty(response.amountReceivable),
     originalAmount: stringOrEmpty(response.originalAmount),
+    reminderFee: stringOrEmpty(response.reminderFee),
+    collectionFee: stringOrEmpty(response.collectionFee),
     dueDate: stringOrEmpty(response.dueDate),
     expectedPaymentDate: stringOrEmpty(response.expectedPaymentDate),
     invoiceDate: stringOrEmpty(response.invoiceDate),
     invoiceNumber: stringOrEmpty(response.invoiceNumber),
     customerNumber: stringOrEmpty(response.customerNumber),
+    reminderLevel: stringOrEmpty(response.reminderLevel),
+    originalCreditorName: stringOrEmpty(response.originalCreditorName),
+    caseNumber: stringOrEmpty(response.caseNumber),
     iban: stringOrEmpty(response.iban),
     bic: stringOrEmpty(response.bic),
     paymentReference: stringOrEmpty(response.paymentReference),
@@ -345,6 +413,8 @@ const mapBackendResponseToDocument = (imageUri: string, response: BackendOcrResp
     reimbursable: booleanOrFalse(response.reimbursable),
     cashflowType: isCashflowType(response.cashflowType) ? response.cashflowType : 'payable',
     ocrSource: 'backend',
+    riskNote: stringOrEmpty(response.riskNote),
+    actionRecommendation: stringOrEmpty(response.actionRecommendation),
   };
 };
 
@@ -369,21 +439,14 @@ const backendOcrDocument = async (imageUri: string): Promise<ScannedDocument> =>
       body: formData,
     });
   } catch (error) {
-    console.log('backend response status', 'request_failed');
     throw error;
   }
-  console.log('backend response status', response.status);
 
   if (!response.ok) {
     let failureReason = `OCR backend failed with status ${response.status}.`;
     try {
-      const payload = (await response.json()) as { error?: unknown; details?: unknown };
-      const backendMessage =
-        typeof payload.error === 'string'
-          ? payload.error
-          : typeof payload.details === 'string'
-            ? payload.details
-            : '';
+      const payload = (await response.json()) as { error?: unknown };
+      const backendMessage = typeof payload.error === 'string' ? payload.error : '';
       failureReason = backendMessage ? `${failureReason} ${backendMessage}` : failureReason;
     } catch {
       // Keep the status-based reason when the backend did not return JSON.
@@ -397,19 +460,13 @@ const backendOcrDocument = async (imageUri: string): Promise<ScannedDocument> =>
   }
 
   const document = mapBackendResponseToDocument(imageUri, payload);
-  console.log('OCR source', document.ocrSource);
   return document;
 };
 
 export const scanDocumentWithOcr = async (imageUri: string): Promise<ScannedDocument> => {
-  console.log('OCR_MODE', OCR_MODE);
-  console.log('BACKEND_OCR_URL', BACKEND_OCR_URL);
-
   if (OCR_MODE === 'backend') {
     return backendOcrDocument(imageUri);
   }
 
-  const document = await mockOcrDocument(imageUri);
-  console.log('OCR source', document.ocrSource);
-  return document;
+  return mockOcrDocument(imageUri);
 };

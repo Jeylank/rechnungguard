@@ -1,12 +1,24 @@
 const dotenv = require('dotenv');
 const express = require('express');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const multer = require('multer');
 
 dotenv.config();
 
 const app = express();
+const uploadDirectory = path.join(os.tmpdir(), 'rechnungguard-ocr-uploads');
 const upload = multer({
-  storage: multer.memoryStorage(),
+  storage: multer.diskStorage({
+    destination: (_request, _file, callback) => {
+      fs.mkdir(uploadDirectory, { recursive: true }, (error) => callback(error, uploadDirectory));
+    },
+    filename: (_request, _file, callback) => {
+      const suffix = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      callback(null, `ocr-upload-${suffix}`);
+    },
+  }),
   limits: {
     fileSize: 10 * 1024 * 1024,
   },
@@ -97,11 +109,17 @@ const mockOcrDocument = {
   payerName: null,
   amountTotal: '49,95 EUR',
   amountReceivable: null,
+  originalAmount: '49,95 EUR',
+  reminderFee: null,
+  collectionFee: null,
   dueDate: '2026-05-25',
   expectedPaymentDate: null,
   invoiceDate: '2026-05-01',
   invoiceNumber: 'RG-2026-1001',
   customerNumber: 'K-123456',
+  reminderLevel: null,
+  originalCreditorName: null,
+  caseNumber: null,
   iban: 'DE89370400440532013000',
   bic: 'COBADEFFXXX',
   paymentReference: 'RG-2026-1001 K-123456',
@@ -111,6 +129,8 @@ const mockOcrDocument = {
   isExpense: true,
   cashflowType: 'payable',
   receivedDate: null,
+  riskNote: null,
+  actionRecommendation: null,
 };
 
 const scannedDocumentSchema = {
@@ -126,11 +146,17 @@ const scannedDocumentSchema = {
     'payerName',
     'amountTotal',
     'amountReceivable',
+    'originalAmount',
+    'reminderFee',
+    'collectionFee',
     'dueDate',
     'expectedPaymentDate',
     'invoiceDate',
     'invoiceNumber',
     'customerNumber',
+    'reminderLevel',
+    'originalCreditorName',
+    'caseNumber',
     'iban',
     'bic',
     'paymentReference',
@@ -140,6 +166,8 @@ const scannedDocumentSchema = {
     'isExpense',
     'cashflowType',
     'receivedDate',
+    'riskNote',
+    'actionRecommendation',
   ],
   properties: {
     documentType: {
@@ -177,6 +205,18 @@ const scannedDocumentSchema = {
       ...nullableStringSchema,
       description: 'Amount expected to be paid to the user for refunds, reimbursements, credit notes, or positive balances, including currency when visible.',
     },
+    originalAmount: {
+      ...nullableStringSchema,
+      description: 'Original principal amount before reminder or collection fees. Extract from Ursprungsbetrag, ursprünglicher Betrag, Hauptforderung, or original invoice amount only when visible.',
+    },
+    reminderFee: {
+      ...nullableStringSchema,
+      description: 'Reminder fee from Mahnkosten, Mahngebühr, zusätzliche Gebühr, or reminder cost lines only when visible.',
+    },
+    collectionFee: {
+      ...nullableStringSchema,
+      description: 'Collection/debt recovery fee from Inkassokosten, Inkassogebühr, Geschäftsgebühr, Auslagenpauschale, or collection cost lines only when visible.',
+    },
     dueDate: {
       ...nullableStringSchema,
       description: 'Payment due date in YYYY-MM-DD. Use null when not visible or not derivable from an explicit visible date plus clear payment term.',
@@ -196,6 +236,18 @@ const scannedDocumentSchema = {
     customerNumber: {
       ...nullableStringSchema,
       description: 'Visible Kundenkonto, Kundennummer, Vertragsnummer, Vertragskonto, Mieternummer, Steuernummer, or account number. Use null if absent.',
+    },
+    reminderLevel: {
+      ...nullableStringSchema,
+      description: 'Visible reminder stage such as Mahnung, 1. Mahnung, 2. Mahnung, letzte außergerichtliche Mahnung, Inkasso, Mahnbescheid, or null if absent.',
+    },
+    originalCreditorName: {
+      ...nullableStringSchema,
+      description: 'Original creditor from ursprünglicher Gläubiger, Gläubiger, Auftraggeber, Mandant, or Forderung der/ des. Use null if absent.',
+    },
+    caseNumber: {
+      ...nullableStringSchema,
+      description: 'Visible Aktenzeichen, Forderungsnummer, Geschäftszeichen, Vorgangsnummer, or collection case number. Use null if absent.',
     },
     iban: {
       ...nullableStringSchema,
@@ -236,6 +288,14 @@ const scannedDocumentSchema = {
       ...nullableStringSchema,
       description: 'Date the incoming payment was already received in YYYY-MM-DD when visible. Use null otherwise.',
     },
+    riskNote: {
+      ...nullableStringSchema,
+      description: 'Short non-legal risk note based only on visible terms such as Mahnbescheid, letzte außergerichtliche Mahnung, Inkasso, critical deadline, or disputed costs. Use null if no special risk is visible.',
+    },
+    actionRecommendation: {
+      ...nullableStringSchema,
+      description: 'Short safe next step based only on visible data, such as check deadline, verify original creditor/case number/fees, save proof, contact Verbraucherzentrale/Schuldnerberatung/lawyer if unsure. No legal advice and no invented facts.',
+    },
   },
 };
 
@@ -243,6 +303,30 @@ const stringOrNull = (value) => (typeof value === 'string' && value.trim() ? val
 const enumOrFallback = (value, values, fallback) => (values.includes(value) ? value : fallback);
 const healthInsurancePattern = /\b(?:dak|aok|tk|techniker\s+krankenkasse|barmer|krankenkasse|gesundheit|pflegeversicherung)\b/i;
 const receivablePattern = /\b(?:steuererstattung|erstattung|rueckerstattung|rückerstattung|guthaben|gutschrift|wird\s+ueberwiesen|wird\s+überwiesen|zu\s+ihren\s+gunsten)\b/i;
+
+const inkassoPattern = /\b(?:inkasso|inkassokosten|forderungseinzug|beitreibung)\b/i;
+const reminderPattern = /\b(?:mahnung|1\.\s*mahnung|2\.\s*mahnung|letzte\s+au[ßs]ergerichtliche\s+mahnung|mahnbescheid|mahnkosten)\b/i;
+const criticalDebtPattern = /\b(?:mahnbescheid|letzte\s+au[ßs]ergerichtliche\s+mahnung)\b/i;
+
+const getDebtSearchableText = (document) => [
+  document.documentType,
+  document.branchCategory,
+  document.paymentStatus,
+  document.senderName,
+  document.creditorName,
+  document.originalCreditorName,
+  document.reminderLevel,
+  document.caseNumber,
+  document.invoiceNumber,
+  document.customerNumber,
+  document.paymentReference,
+  document.riskNote,
+  document.actionRecommendation,
+  document.reminderFee,
+  document.collectionFee,
+]
+  .filter((value) => typeof value === 'string')
+  .join(' ');
 
 const isKnownHealthInsurerDocument = (document) => {
   const searchableText = [
@@ -286,11 +370,17 @@ const normalizeOcrDocument = (document) => {
     payerName: stringOrNull(document.payerName),
     amountTotal: stringOrNull(document.amountTotal),
     amountReceivable: stringOrNull(document.amountReceivable),
+    originalAmount: stringOrNull(document.originalAmount),
+    reminderFee: stringOrNull(document.reminderFee),
+    collectionFee: stringOrNull(document.collectionFee),
     dueDate: stringOrNull(document.dueDate),
     expectedPaymentDate: stringOrNull(document.expectedPaymentDate),
     invoiceDate: stringOrNull(document.invoiceDate),
     invoiceNumber: stringOrNull(document.invoiceNumber),
     customerNumber: stringOrNull(document.customerNumber),
+    reminderLevel: stringOrNull(document.reminderLevel),
+    originalCreditorName: stringOrNull(document.originalCreditorName),
+    caseNumber: stringOrNull(document.caseNumber),
     iban: stringOrNull(document.iban),
     bic: stringOrNull(document.bic),
     paymentReference: stringOrNull(document.paymentReference),
@@ -300,7 +390,24 @@ const normalizeOcrDocument = (document) => {
     isExpense: typeof document.isExpense === 'boolean' ? document.isExpense : null,
     cashflowType: enumOrFallback(document.cashflowType, cashflowTypeValues, 'unknown'),
     receivedDate: stringOrNull(document.receivedDate),
+    riskNote: stringOrNull(document.riskNote),
+    actionRecommendation: stringOrNull(document.actionRecommendation),
   };
+
+  const debtSearchableText = getDebtSearchableText({ ...document, ...normalizedDocument });
+  if (inkassoPattern.test(debtSearchableText)) {
+    normalizedDocument.documentType = 'inkasso_letter';
+    normalizedDocument.branchCategory = 'inkasso';
+    normalizedDocument.expenseCategory = 'legal';
+    normalizedDocument.cashflowType = 'payable';
+  } else if (reminderPattern.test(debtSearchableText)) {
+    normalizedDocument.documentType = 'payment_reminder';
+    normalizedDocument.cashflowType = 'payable';
+  }
+
+  if (criticalDebtPattern.test(debtSearchableText)) {
+    normalizedDocument.urgencyLevel = 'critical';
+  }
 
   if (isReceivableDocument({ ...document, ...normalizedDocument })) {
     normalizedDocument.cashflowType = 'receivable';
@@ -323,7 +430,22 @@ const normalizeOcrDocument = (document) => {
   return normalizedDocument;
 };
 
-const getDataUrl = (file) => `data:${file.mimetype};base64,${file.buffer.toString('base64')}`;
+const getDataUrl = async (file) => {
+  const buffer = await fs.promises.readFile(file.path);
+  return `data:${file.mimetype};base64,${buffer.toString('base64')}`;
+};
+
+const deleteUploadedFile = async (file) => {
+  if (!file?.path) {
+    return;
+  }
+
+  try {
+    await fs.promises.unlink(file.path);
+  } catch {
+    console.warn('OCR upload cleanup skipped');
+  }
+};
 
 const ocrSystemPrompt = [
   'Du extrahierst strukturierte Daten aus deutschen Zahlungsdokumenten fuer RechnungGuard.',
@@ -337,6 +459,13 @@ const ocrSystemPrompt = [
   'Unterscheide die Geldrichtung: Rechnung, Bill, Mahnung und Inkasso sind cashflowType payable. Steuererstattung, Erstattung, Rueckerstattung, Guthaben, Gutschrift, "wird ueberwiesen" und "zu Ihren Gunsten" sind cashflowType receivable. Reine Informationsschreiben oder Vertraege ohne Zahlung sind neutral. Wenn unklar, unknown.',
   'Bei receivable: amountReceivable ist der erwartete Zahlungseingang, payerName ist die Stelle, die an den Nutzer zahlt, expectedPaymentDate ist der erwartete Zahlungstermin falls sichtbar. amountTotal soll null sein, wenn kein Betrag zu zahlen ist. paymentStatus ist expected, oder received wenn ein erfolgter Zahlungseingang sichtbar ist.',
   'Priorisiere explizite Zahlungsbereiche: "Bitte ueberweisen Sie", "Zahlbar bis", "Faellig am", "Verwendungszweck", "SEPA-Lastschrift", "Zahlteil", "Empfaenger", "IBAN", "BIC", "Kassenzeichen", "Vertragskonto", "Aktenzeichen".',
+  'Erkenne deutsche Mahn- und Forderungsbegriffe besonders genau: Mahnung, 1. Mahnung, 2. Mahnung, letzte aussergerichtliche Mahnung, Inkasso, Mahnbescheid, Forderung, Aktenzeichen, Glaeubiger, urspruenglicher Glaeubiger, Mahnkosten, Inkassokosten, Restbetrag und Ursprungsbetrag.',
+  'Wenn "Mahnbescheid" sichtbar ist, setze urgencyLevel critical und schreibe in riskNote, dass ein Mahnbescheid erwaehnt wird. Wenn "letzte aussergerichtliche Mahnung" sichtbar ist, setze urgencyLevel critical.',
+  'Wenn Inkasso sichtbar ist, setze documentType inkasso_letter. Wenn Mahnung sichtbar ist und kein Inkasso vorliegt, setze documentType payment_reminder. Erfinde keine Mahnstufe, wenn keine sichtbar ist.',
+  'Extrahiere reminderLevel exakt aus sichtbaren Begriffen wie "1. Mahnung", "2. Mahnung", "letzte aussergerichtliche Mahnung", "Inkasso" oder "Mahnbescheid"; sonst null.',
+  'Extrahiere originalCreditorName aus "urspruenglicher Glaeubiger", "Glaeubiger", "Auftraggeber", "Mandant" oder "Forderung der/des", nur wenn sichtbar. Extrahiere caseNumber aus Aktenzeichen, Forderungsnummer, Geschaeftszeichen oder Vorgangsnummer.',
+  'Extrahiere originalAmount aus Ursprungsbetrag, urspruenglicher Betrag oder Hauptforderung. Extrahiere reminderFee aus Mahnkosten, Mahngebuehr oder zusaetzliche Gebuehr. Extrahiere collectionFee aus Inkassokosten, Inkassogebuehr, Geschaeftsgebuehr oder Auslagenpauschale.',
+  'Extrahiere amountTotal bevorzugt aus Restbetrag, Gesamtforderung, offener Betrag, zu zahlen bis, zahlbar bis oder aktuell geforderte Gesamtsumme. Do not invent missing values.',
   'Erkenne Inkasso-Schreiben separat als documentType inkasso_letter und branchCategory inkasso. Inkasso liegt vor, wenn ein Inkassounternehmen, Forderungsbeitreibung, Aktenzeichen, Vollmacht, Inkassokosten oder aehnliche Formulierungen sichtbar sind.',
   'Bei Inkasso: senderName ist das Inkassounternehmen oder die Kanzlei. creditorName ist der urspruengliche Glaeubiger/Auftraggeber/Mandant, falls sichtbar, zum Beispiel "Forderung der Stadtwerke Beispiel GmbH" oder "Auftraggeber: ConnectTel GmbH"; sonst null. amountTotal ist die aktuell geforderte Gesamtsumme inklusive Inkassokosten, falls sichtbar.',
   'Bei normalen Rechnungen, Mahnungen und Online-Bestellungen ist creditorName normalerweise der Zahlungsempfaenger/Glaeubiger. senderName ist der sichtbare Absender oder Rechnungssteller.',
@@ -367,6 +496,8 @@ const ocrUserPrompt = [
   'Pruefe besonders senderName, creditorName, payerName, amountTotal, amountReceivable, dueDate, expectedPaymentDate, invoiceDate, invoiceNumber, customerNumber, iban, bic, paymentReference, documentType, branchCategory, paymentStatus, urgencyLevel, expenseCategory, cashflowType und isExpense.',
   'Suche bei Inkasso explizit nach urspruenglichem Glaeubiger, Mandant, Auftraggeber, Forderung aus, Vertragskonto oder Waren-/Dienstleistername.',
   'Suche bei Strom/Gas/Wasser, Telekom, Miete, Versicherung und Behoerde/Steuer nach branchenspezifischen Referenzen wie Vertragskonto, Kundennummer, Mieterkonto, Versicherungsschein, Kassenzeichen, Steuernummer, Aktenzeichen und Verwendungszweck.',
+  'Suche bei Mahnung und Inkasso nach reminderLevel, originalCreditorName, caseNumber, originalAmount, reminderFee, collectionFee, riskNote und actionRecommendation.',
+  'Achte auf Mahnbescheid und letzte aussergerichtliche Mahnung als kritische Frist. Achte auf Restbetrag als aktuell zu zahlenden Betrag und Ursprungsbetrag als originalAmount.',
   'Gib null zurueck, wenn IBAN, Rechnungsnummer, Faelligkeit oder urspruenglicher Glaeubiger nicht sichtbar sind.',
   'Gib nur das JSON-Objekt zurueck.',
 ].join(' ');
@@ -392,11 +523,12 @@ const parseOpenAiOcrResponse = (payload) => {
 
 const readOpenAiError = async (response) => {
   try {
-    const payload = await response.json();
-    return payload.error?.message || `OpenAI request failed with status ${response.status}`;
+    await response.text();
   } catch {
-    return `OpenAI request failed with status ${response.status}`;
+    // Intentionally discard provider error bodies; they can contain request context.
   }
+
+  return `OpenAI request failed with status ${response.status}`;
 };
 
 const extractWithOpenAi = async (file) => {
@@ -426,7 +558,7 @@ const extractWithOpenAi = async (file) => {
             },
             {
               type: 'input_image',
-              image_url: getDataUrl(file),
+              image_url: await getDataUrl(file),
             },
           ],
         },
@@ -465,7 +597,11 @@ app.post('/ocr', upload.single('image'), async (request, response) => {
   }
 
   if (ocrProvider === 'mock') {
-    response.json(mockOcrDocument);
+    try {
+      response.json(mockOcrDocument);
+    } finally {
+      await deleteUploadedFile(request.file);
+    }
     return;
   }
 
@@ -476,20 +612,25 @@ app.post('/ocr', upload.single('image'), async (request, response) => {
         ocrProvider: 'openai',
       });
     } catch (error) {
-      console.error('OpenAI OCR failed:', error.message);
+      console.error('OpenAI OCR failed');
       response.status(500).json({
-        error: 'OpenAI OCR failed',
-        details: error.message,
+        error: 'OCR processing failed',
         ocrProvider: 'openai',
       });
+    } finally {
+      await deleteUploadedFile(request.file);
     }
     return;
   }
 
-  console.error(`Unsupported OCR provider "${ocrProvider}".`);
-  response.status(500).json({
-    error: `Unsupported OCR provider "${ocrProvider}".`,
-  });
+  try {
+    console.error('Unsupported OCR provider configured');
+    response.status(500).json({
+      error: 'OCR provider is not configured correctly',
+    });
+  } finally {
+    await deleteUploadedFile(request.file);
+  }
 });
 
 app.use((_request, response) => {
@@ -501,13 +642,13 @@ app.use((_request, response) => {
 app.use((error, _request, response, _next) => {
   if (error instanceof multer.MulterError) {
     response.status(400).json({
-      error: error.message,
+      error: 'Invalid upload',
     });
     return;
   }
 
   if (error) {
-    console.error('Unexpected server error:', error.message);
+    console.error('Unexpected server error');
     response.status(400).json({
       error: 'Invalid request',
     });
