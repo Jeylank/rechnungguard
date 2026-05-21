@@ -676,34 +676,28 @@ app.post('/ocr', upload.single('image'), async (request, response) => {
     return;
   }
 
-  if (ocrProvider === 'mock') {
-    try {
-      response.json(mockOcrDocument);
-    } finally {
-      await deleteUploadedFile(request.file);
-    }
-    return;
-  }
-
-  if (ocrProvider === 'openai') {
-    try {
-      response.json({
-        ...(await extractWithOpenAi(request.file)),
-        ocrProvider: 'openai',
-      });
-    } catch (error) {
-      console.error('OpenAI OCR failed');
-      response.status(500).json({
-        error: 'OCR processing failed',
-        ocrProvider: 'openai',
-      });
-    } finally {
-      await deleteUploadedFile(request.file);
-    }
-    return;
-  }
-
   try {
+    if (ocrProvider === 'mock') {
+      response.json(mockOcrDocument);
+      return;
+    }
+
+    if (ocrProvider === 'openai') {
+      try {
+        response.json({
+          ...(await extractWithOpenAi(request.file)),
+          ocrProvider: 'openai',
+        });
+      } catch {
+        console.error('OpenAI OCR failed');
+        response.status(500).json({
+          error: 'OCR processing failed',
+          ocrProvider: 'openai',
+        });
+      }
+      return;
+    }
+
     console.error('Unsupported OCR provider configured');
     response.status(500).json({
       error: 'OCR provider is not configured correctly',

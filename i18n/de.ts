@@ -37,7 +37,7 @@ export const de = {
   deleteDocument: 'Dokument löschen',
   deleteDocumentConfirm: 'Dieses Dokument und seine lokalen Erinnerungen werden gelöscht.',
   deleteAllLocalData: 'Alle lokalen Daten löschen',
-  deleteAllLocalDataConfirm: 'Alle Dokumente, lokalen Datenschutzeinstellungen und Erinnerungen auf diesem Gerät werden gelöscht. Die Spracheinstellung bleibt erhalten.',
+  deleteAllLocalDataConfirm: 'Alle Dokumente, lokalen Einstellungen und Erinnerungen auf diesem Gerät werden gelöscht.',
   debtRiskTitle: 'Mahnung / Inkasso',
   debtRiskLabels: {
     criticalDeadline: 'Kritische Frist',

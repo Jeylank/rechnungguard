@@ -543,6 +543,7 @@ export default function App() {
 
     await deleteAllDocuments();
     await AsyncStorage.multiRemove([
+      LANGUAGE_STORAGE_KEY,
       PRIVACY_NOTICE_ACCEPTED_STORAGE_KEY,
       STORE_DOCUMENT_IMAGES_STORAGE_KEY,
     ]);
@@ -550,6 +551,7 @@ export default function App() {
     setDraft(null);
     setSelectedDocument(null);
     setSelectedImageUri(null);
+    setLanguage(defaultLanguage);
     setPrivacyNoticeAccepted(false);
     setStoreDocumentImages(false);
     setScreen('home');
@@ -696,7 +698,6 @@ export default function App() {
         {screen === 'review' && draft ? (
           <ReviewScreen
             draft={draft}
-            ocrMode={OCR_MODE}
             t={t}
             onChange={setDraft}
             onSave={() => saveDocument(draft)}
@@ -879,7 +880,6 @@ function ScanScreen({
       <View style={styles.statusBadgeGroup}>
         {statusText ? <Text style={styles.modeBadge}>{statusText}</Text> : null}
       </View>
-      <Text style={styles.subtleText}>{t.chooseImageHint}</Text>
       <Pressable disabled={isLoading} style={[styles.primaryButton, isLoading && styles.disabledButton]} onPress={onPickImage}>
         <Text style={styles.primaryButtonText}>{imageUri ? t.changeImage : t.pickImage}</Text>
       </Pressable>
@@ -907,29 +907,18 @@ function ScanScreen({
 
 function ReviewScreen({
   draft,
-  ocrMode,
   t,
   onChange,
   onSave,
 }: {
   draft: ScannedDocument;
-  ocrMode: typeof OCR_MODE;
   t: Translation;
   onChange: (document: ScannedDocument) => void;
   onSave: () => void;
 }) {
-  const sourceLabel =
-    draft.ocrSource === 'backend'
-      ? t.ocrSourceBackend
-      : draft.ocrSource === 'mock' && ocrMode === 'mock'
-        ? t.ocrSourceMock
-        : t.ocrSourceFallback;
-
   return (
     <ScrollView contentContainerStyle={styles.scrollContent}>
       <Text style={styles.screenTitle}>{t.reviewScan}</Text>
-      <Text style={[styles.modeBadge, styles.reviewSourceBadge]}>{sourceLabel}</Text>
-      {draft.ocrSource === 'fallback' ? <Text style={styles.fallbackWarning}>{t.fallbackMockWarning}</Text> : null}
       <ImagePreview imageUri={draft.imageUri} t={t} />
       <DocumentForm document={draft} t={t} onChange={onChange} />
       <ExpenseReviewFields document={draft} t={t} onChange={onChange} />

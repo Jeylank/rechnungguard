@@ -37,7 +37,7 @@ export const en = {
   deleteDocument: 'Delete document',
   deleteDocumentConfirm: 'This document and its local reminders will be deleted.',
   deleteAllLocalData: 'Delete all local data',
-  deleteAllLocalDataConfirm: 'All documents, local privacy settings, and reminders on this device will be deleted. The language setting is kept.',
+  deleteAllLocalDataConfirm: 'All documents, local settings, and reminders on this device will be deleted.',
   debtRiskTitle: 'Reminder / Inkasso',
   debtRiskLabels: {
     criticalDeadline: 'Critical deadline',
