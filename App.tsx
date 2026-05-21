@@ -805,16 +805,18 @@ function HomeScreen({
       <View style={styles.privacySettings}>
         <View style={styles.settingRow}>
           <View style={styles.settingTextBlock}>
-            <Text style={styles.inputLabel}>{t.storeDocumentImages}</Text>
+            <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.86} style={styles.inputLabel}>
+              {t.storeDocumentImages}
+            </Text>
             <Text style={styles.settingHint}>{t.storeDocumentImagesHint}</Text>
           </View>
           <Pressable
             accessibilityRole="switch"
             accessibilityState={{ checked: storeDocumentImages }}
-            style={[styles.toggleButton, storeDocumentImages && styles.toggleButtonEnabled]}
+            style={[styles.settingToggleButton, storeDocumentImages && styles.settingToggleButtonEnabled]}
             onPress={() => onChangeStoreDocumentImages(!storeDocumentImages)}
           >
-            <Text style={[styles.toggleButtonText, storeDocumentImages && styles.toggleButtonTextEnabled]}>
+            <Text style={[styles.settingToggleButtonText, storeDocumentImages && styles.settingToggleButtonTextEnabled]}>
               {storeDocumentImages ? t.on : t.off}
             </Text>
           </Pressable>
@@ -1314,6 +1316,10 @@ function DocumentForm({
 }
 
 function ExpenseSummarySection({ summary, t }: { summary: ExpenseSummary; t: Translation }) {
+  const activeCategories = summary.categoryBreakdown.filter(
+    (item) => item.openAmount > 0 || item.paidOrReceivedThisMonth > 0,
+  );
+
   return (
     <View style={styles.summarySection}>
       <Text style={styles.sectionTitle}>{t.expenseSummary}</Text>
@@ -1323,38 +1329,26 @@ function ExpenseSummarySection({ summary, t }: { summary: ExpenseSummary; t: Tra
         <SummaryTile label={t.paidOrReceivedThisMonth} value={formatEuro(summary.paidOrReceivedThisMonth)} />
         <SummaryTile label={t.openInvoiceCount} value={String(summary.openInvoiceCount)} />
       </View>
-      <Text style={styles.categoryBreakdownTitle}>{t.categoryBreakdown}</Text>
-      <View style={styles.categoryBreakdownList}>
-        {summary.categoryBreakdown.map((item) => (
-          <View key={item.category} style={styles.categoryBreakdownRow}>
-            <Text style={styles.categoryBreakdownName}>{getExpenseCategoryLabel(t, item.category)}</Text>
-            <View style={styles.categoryBreakdownAmounts}>
-              <View style={styles.categoryMetric}>
-                <Text style={styles.categoryMetricLabel}>{t.categoryOpenAmount}</Text>
-                <Text
-                  numberOfLines={1}
-                  adjustsFontSizeToFit
-                  minimumFontScale={0.72}
-                  style={styles.categoryMetricValue}
-                >
-                  {formatEuro(item.openAmount)}
-                </Text>
+      {activeCategories.length > 0 ? (
+        <>
+          <Text style={styles.categoryBreakdownTitle}>{t.categoryBreakdown}</Text>
+          <View style={styles.categoryBreakdownList}>
+            {activeCategories.map((item) => (
+              <View key={item.category} style={styles.categoryBreakdownRow}>
+                <Text style={styles.categoryBreakdownName}>{getExpenseCategoryLabel(t, item.category)}</Text>
+                <View style={styles.categoryBreakdownAmounts}>
+                  {item.openAmount > 0 ? (
+                    <Text style={styles.categoryMetricValue}>{formatEuro(item.openAmount)}</Text>
+                  ) : null}
+                  {item.paidOrReceivedThisMonth > 0 ? (
+                    <Text style={styles.categoryMetricMuted}>{formatEuro(item.paidOrReceivedThisMonth)}</Text>
+                  ) : null}
+                </View>
               </View>
-              <View style={styles.categoryMetric}>
-                <Text style={styles.categoryMetricLabel}>{t.categoryPaidOrReceivedThisMonth}</Text>
-                <Text
-                  numberOfLines={1}
-                  adjustsFontSizeToFit
-                  minimumFontScale={0.72}
-                  style={styles.categoryMetricValue}
-                >
-                  {formatEuro(item.paidOrReceivedThisMonth)}
-                </Text>
-              </View>
-            </View>
+            ))}
           </View>
-        ))}
-      </View>
+        </>
+      ) : null}
     </View>
   );
 }
@@ -1575,7 +1569,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   settingRow: {
-    alignItems: 'center',
+    alignItems: 'flex-start',
     backgroundColor: '#ffffff',
     borderColor: '#e5ddd1',
     borderRadius: 8,
@@ -1587,30 +1581,37 @@ const styles = StyleSheet.create({
   },
   settingTextBlock: {
     flex: 1,
+    minWidth: 0,
+    paddingRight: 6,
   },
   settingHint: {
     color: '#65716d',
     fontSize: 13,
     lineHeight: 18,
+    marginTop: 3,
   },
-  toggleButton: {
+  settingToggleButton: {
     alignItems: 'center',
+    alignSelf: 'center',
     borderColor: '#bdc9c4',
     borderRadius: 8,
     borderWidth: 1,
+    justifyContent: 'center',
+    minHeight: 40,
     minWidth: 58,
     paddingHorizontal: 12,
     paddingVertical: 8,
   },
-  toggleButtonEnabled: {
+  settingToggleButtonEnabled: {
     backgroundColor: '#0d5c63',
     borderColor: '#0d5c63',
   },
-  toggleButtonText: {
+  settingToggleButtonText: {
     color: '#153433',
     fontWeight: '800',
+    textAlign: 'center',
   },
-  toggleButtonTextEnabled: {
+  settingToggleButtonTextEnabled: {
     color: '#ffffff',
   },
   backButton: {
@@ -1803,40 +1804,43 @@ const styles = StyleSheet.create({
     marginTop: 14,
   },
   categoryBreakdownList: {
-    gap: 8,
+    gap: 6,
   },
   categoryBreakdownRow: {
+    alignItems: 'center',
     backgroundColor: '#ffffff',
     borderColor: '#e5ddd1',
     borderRadius: 8,
     borderWidth: 1,
-    padding: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 46,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
   },
   categoryBreakdownName: {
     color: '#153433',
-    fontSize: 15,
+    flex: 1,
+    fontSize: 14,
     fontWeight: '800',
-    marginBottom: 8,
+    paddingRight: 10,
   },
   categoryBreakdownAmounts: {
+    alignItems: 'flex-end',
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 8,
-  },
-  categoryMetric: {
-    flexGrow: 1,
-    minWidth: 128,
-  },
-  categoryMetricLabel: {
-    color: '#65716d',
-    fontSize: 12,
-    fontWeight: '700',
-    marginBottom: 3,
+    justifyContent: 'flex-end',
   },
   categoryMetricValue: {
     color: '#153433',
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '800',
+  },
+  categoryMetricMuted: {
+    color: '#65716d',
+    fontSize: 13,
+    fontWeight: '700',
   },
   previewFrame: {
     alignItems: 'center',
