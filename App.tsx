@@ -14,6 +14,7 @@ import {
   View,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Clipboard from 'expo-clipboard';
 import * as ImagePicker from 'expo-image-picker';
 import {
   defaultLanguage,
@@ -29,6 +30,7 @@ import {
   DocumentType,
   ExpenseCategory,
   expenseCategoryValues,
+  cashflowTypeValues,
   inkassoChecklistItems,
   paymentStatusValues,
   PaymentStatus,
@@ -36,17 +38,21 @@ import {
   urgencyLevelValues,
 } from './types/ScannedDocument';
 
-type Screen = 'home' | 'scan' | 'review' | 'detail';
+type Screen = 'home' | 'scan' | 'review' | 'detail' | 'paymentPreparation';
 type BackendStatus = 'checking' | 'reachable' | 'unreachable';
 type EditableField =
   | 'documentType'
   | 'paymentStatus'
+  | 'cashflowType'
   | 'senderName'
   | 'creditorName'
+  | 'payerName'
   | 'branchCategory'
   | 'amountTotal'
+  | 'amountReceivable'
   | 'originalAmount'
   | 'dueDate'
+  | 'expectedPaymentDate'
   | 'invoiceDate'
   | 'invoiceNumber'
   | 'customerNumber'
@@ -54,11 +60,13 @@ type EditableField =
   | 'bic'
   | 'paymentReference'
   | 'documentLanguage'
-  | 'urgencyLevel';
+  | 'urgencyLevel'
+  | 'receivedDate';
 
 type ExpenseSummary = {
   openAmount: number;
-  paidAmountThisMonth: number;
+  expectedReceivableAmount: number;
+  paidOrReceivedThisMonth: number;
   openInvoiceCount: number;
   categoryBreakdown: ExpenseCategorySummary[];
 };
@@ -66,12 +74,15 @@ type ExpenseSummary = {
 type ExpenseCategorySummary = {
   category: ExpenseCategory;
   openAmount: number;
-  paidAmountThisMonth: number;
+  paidOrReceivedThisMonth: number;
 };
 
 const unpaidStatuses = new Set(['needs_review', 'unpaid', 'sent_to_insurance', 'waiting_reimbursement']);
 const openExpenseStatuses = new Set<ScannedDocument['paymentStatus']>(['needs_review', 'unpaid']);
+const receivableOpenStatuses = new Set<ScannedDocument['paymentStatus']>(['needs_review', 'expected', 'waiting_reimbursement']);
+const blockedPaymentPreparationStatuses = new Set<ScannedDocument['paymentStatus']>(['paid', 'closed']);
 const LANGUAGE_STORAGE_KEY = 'rechnungguard.language.v1';
+const ENABLE_BACKEND_DIAGNOSTICS = false;
 
 const getErrorMessage = (error: unknown) => {
   if (error instanceof Error) {
@@ -84,12 +95,16 @@ const getErrorMessage = (error: unknown) => {
 const fieldOrder: EditableField[] = [
   'documentType',
   'paymentStatus',
+  'cashflowType',
   'senderName',
   'creditorName',
+  'payerName',
   'branchCategory',
   'amountTotal',
+  'amountReceivable',
   'originalAmount',
   'dueDate',
+  'expectedPaymentDate',
   'invoiceDate',
   'invoiceNumber',
   'customerNumber',
@@ -98,12 +113,17 @@ const fieldOrder: EditableField[] = [
   'paymentReference',
   'documentLanguage',
   'urgencyLevel',
+  'receivedDate',
 ];
 
 const sortByDateDesc = (a: ScannedDocument, b: ScannedDocument) =>
   new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
 
 const isUrgent = (document: ScannedDocument) => {
+  if (document.cashflowType !== 'payable') {
+    return false;
+  }
+
   if (!unpaidStatuses.has(document.paymentStatus)) {
     return false;
   }
@@ -120,11 +140,37 @@ const getPaymentStatusLabel = (t: Translation, value: ScannedDocument['paymentSt
   t.paymentStatuses[value] ?? value;
 const getUrgencyLevelLabel = (t: Translation, value: ScannedDocument['urgencyLevel']) =>
   t.urgencyLevels[value] ?? value;
+const getCashflowTypeLabel = (t: Translation, value: ScannedDocument['cashflowType']) =>
+  t.cashflowTypes[value] ?? value;
 const getExpenseCategoryLabel = (t: Translation, value: ScannedDocument['expenseCategory']) =>
   t.expenseCategories[value] ?? value;
 const getPaymentMethodLabel = (t: Translation, value: ScannedDocument['paymentMethod']) =>
   t.paymentMethods[value] ?? value;
 const getBooleanLabel = (t: Translation, value: boolean) => (value ? t.yes : t.no);
+
+const copyToClipboard = (value: string) => Clipboard.setStringAsync(value);
+
+const getPaymentRecipient = (document: ScannedDocument) =>
+  document.paymentRecipient || document.creditorName || document.senderName;
+
+const getPaymentReference = (document: ScannedDocument) =>
+  document.paymentReference || document.invoiceNumber || document.customerNumber;
+
+const canPreparePayment = (document: ScannedDocument) => {
+  if (document.documentType === 'payment_proof') {
+    return false;
+  }
+
+  if (document.cashflowType !== 'payable' && document.cashflowType !== 'unknown') {
+    return false;
+  }
+
+  if (blockedPaymentPreparationStatuses.has(document.paymentStatus)) {
+    return false;
+  }
+
+  return Boolean(document.amountTotal);
+};
 
 const getDetailValue = (t: Translation, document: ScannedDocument, field: EditableField) => {
   if (field === 'documentType') {
@@ -135,6 +181,9 @@ const getDetailValue = (t: Translation, document: ScannedDocument, field: Editab
   }
   if (field === 'urgencyLevel') {
     return getUrgencyLevelLabel(t, document.urgencyLevel);
+  }
+  if (field === 'cashflowType') {
+    return getCashflowTypeLabel(t, document.cashflowType);
   }
   return String(document[field] ?? '') || '-';
 };
@@ -172,7 +221,7 @@ const createEmptyCategoryBreakdown = (): ExpenseCategorySummary[] =>
   expenseCategoryValues.map((category) => ({
     category,
     openAmount: 0,
-    paidAmountThisMonth: 0,
+    paidOrReceivedThisMonth: 0,
   }));
 
 const getExpenseSummary = (documents: ScannedDocument[]): ExpenseSummary => {
@@ -181,7 +230,18 @@ const getExpenseSummary = (documents: ScannedDocument[]): ExpenseSummary => {
 
   return documents.reduce<ExpenseSummary>(
     (summary, document) => {
-      if (document.isExpense === false) {
+      if (document.cashflowType === 'receivable') {
+        const receivableAmount = parseAmount(document.amountReceivable || document.amountTotal);
+        if (receivableOpenStatuses.has(document.paymentStatus)) {
+          summary.expectedReceivableAmount += receivableAmount;
+        }
+        if (document.paymentStatus === 'received' && isThisMonth(document.receivedDate)) {
+          summary.paidOrReceivedThisMonth += receivableAmount;
+        }
+        return summary;
+      }
+
+      if (document.cashflowType !== 'payable' || document.isExpense === false) {
         return summary;
       }
 
@@ -197,15 +257,15 @@ const getExpenseSummary = (documents: ScannedDocument[]): ExpenseSummary => {
       }
 
       if (document.paymentStatus === 'paid' && isThisMonth(document.paidDate)) {
-        summary.paidAmountThisMonth += amount;
+        summary.paidOrReceivedThisMonth += amount;
         if (categorySummary) {
-          categorySummary.paidAmountThisMonth += amount;
+          categorySummary.paidOrReceivedThisMonth += amount;
         }
       }
 
       return summary;
     },
-    { openAmount: 0, paidAmountThisMonth: 0, openInvoiceCount: 0, categoryBreakdown },
+    { openAmount: 0, expectedReceivableAmount: 0, paidOrReceivedThisMonth: 0, openInvoiceCount: 0, categoryBreakdown },
   );
 };
 
@@ -358,7 +418,7 @@ export default function App() {
     setScreen('detail');
   };
 
-  const updateDocumentStatus = async (status: Extract<PaymentStatus, 'paid' | 'disputed' | 'closed'>) => {
+  const updateDocumentStatus = async (status: Extract<PaymentStatus, 'expected' | 'paid' | 'received' | 'disputed' | 'closed'>) => {
     if (!selectedDocument?.id) {
       Alert.alert(t.documentDetails, 'Kein Dokument ausgewahlt.');
       return;
@@ -374,6 +434,7 @@ export default function App() {
         ...selectedDocument,
         paymentStatus: status,
         paidDate: status === 'paid' ? todayIsoDate() : selectedDocument.paidDate,
+        receivedDate: status === 'received' ? todayIsoDate() : selectedDocument.receivedDate,
       };
 
       const savedDocument = await upsertDocument(updatedDocument);
@@ -433,12 +494,9 @@ export default function App() {
         console.log('OCR source', 'none');
         console.error('OCR failed', error);
         setDraft(null);
-        setLastOcrError(errorMessage);
+        setLastOcrError(ENABLE_BACKEND_DIAGNOSTICS ? errorMessage : null);
         setScreen('scan');
-        Alert.alert(
-          t.ocrFailedTitle,
-          OCR_MODE === 'backend' ? `${t.backendOcrFailedNoRealData}\n\n${errorMessage}` : t.ocrFailedManualReview,
-        );
+        Alert.alert(t.ocrFailedTitle, t.ocrFailedManualReview);
       }
     } finally {
       setIsLoading(false);
@@ -454,7 +512,7 @@ export default function App() {
             disabled={isLoading}
             hitSlop={10}
             style={[styles.backButton, isLoading && styles.disabledButton]}
-            onPress={() => setScreen('home')}
+            onPress={() => setScreen(screen === 'paymentPreparation' ? 'detail' : 'home')}
           >
             <Text style={styles.backButtonText}>{t.back}</Text>
           </Pressable>
@@ -485,6 +543,7 @@ export default function App() {
             isLoading={isLoading}
             lastOcrError={lastOcrError}
             ocrMode={OCR_MODE}
+            showDeveloperDiagnostics={ENABLE_BACKEND_DIAGNOSTICS}
             t={t}
             onPickImage={chooseImage}
             onProcessImage={processSelectedImage}
@@ -493,7 +552,13 @@ export default function App() {
         ) : null}
 
         {screen === 'review' && draft ? (
-          <ReviewScreen draft={draft} ocrMode={OCR_MODE} t={t} onChange={setDraft} onSave={() => saveDocument(draft)} />
+          <ReviewScreen
+            draft={draft}
+            ocrMode={OCR_MODE}
+            t={t}
+            onChange={setDraft}
+            onSave={() => saveDocument(draft)}
+          />
         ) : null}
 
         {screen === 'detail' && selectedDocument ? (
@@ -502,11 +567,24 @@ export default function App() {
             isSavingStatus={isSavingStatus}
             t={t}
             onChange={setSelectedDocument}
+            onPreparePayment={() => setScreen('paymentPreparation')}
             onUpdateStatus={updateDocumentStatus}
             onSave={async (document) => {
               const savedDocument = await upsertDocument(document);
               setSelectedDocument(savedDocument);
               await loadDocuments();
+            }}
+          />
+        ) : null}
+
+        {screen === 'paymentPreparation' && selectedDocument ? (
+          <PaymentPreparationScreen
+            document={selectedDocument}
+            isSavingStatus={isSavingStatus}
+            t={t}
+            onMarkAsPaid={async () => {
+              await updateDocumentStatus('paid');
+              setScreen('detail');
             }}
           />
         ) : null}
@@ -605,6 +683,7 @@ function ScanScreen({
   isLoading,
   lastOcrError,
   ocrMode,
+  showDeveloperDiagnostics,
   t,
   onPickImage,
   onProcessImage,
@@ -616,6 +695,7 @@ function ScanScreen({
   isLoading: boolean;
   lastOcrError: string | null;
   ocrMode: typeof OCR_MODE;
+  showDeveloperDiagnostics: boolean;
   t: Translation;
   onPickImage: () => void;
   onProcessImage: () => void;
@@ -623,7 +703,7 @@ function ScanScreen({
 }) {
   const statusText =
     backendStatus === 'checking'
-      ? t.ocrPreparing
+      ? t.ocrRunning
       : backendStatus === 'reachable'
         ? t.backendReachable
         : backendStatus === 'unreachable'
@@ -634,24 +714,29 @@ function ScanScreen({
     <ScrollView contentContainerStyle={styles.scanContent}>
       <Text style={styles.screenTitle}>{t.scanBillOrLetter}</Text>
       <View style={styles.statusBadgeGroup}>
-        <Text style={styles.modeBadge}>{t.ocrMode}: {ocrMode === 'backend' ? t.ocrModeBackend : t.ocrModeMock}</Text>
         {statusText ? <Text style={styles.modeBadge}>{statusText}</Text> : null}
       </View>
-      <View style={styles.debugBox}>
-        <Text style={styles.debugLabel}>{t.backendOcrUrl}</Text>
-        <Text selectable style={styles.debugValue}>{BACKEND_OCR_URL}</Text>
-        <Text style={styles.debugLabel}>{t.backendHealthUrl}</Text>
-        <Text selectable style={styles.debugValue}>{BACKEND_HEALTH_URL}</Text>
-        {backendHealthResult ? <Text selectable style={styles.debugResult}>{backendHealthResult}</Text> : null}
-        {lastOcrError ? <Text selectable style={styles.errorText}>{lastOcrError}</Text> : null}
-      </View>
-      <Pressable
-        disabled={isLoading}
-        style={[styles.scanTestButton, isLoading && styles.disabledButton]}
-        onPress={onTestBackend}
-      >
-        <Text style={styles.scanTestButtonText}>{t.testBackend}</Text>
-      </Pressable>
+      {showDeveloperDiagnostics ? (
+        <>
+          <View style={styles.debugBox}>
+            <Text style={styles.debugLabel}>{t.ocrMode}</Text>
+            <Text style={styles.debugValue}>{ocrMode === 'backend' ? t.ocrModeBackend : t.ocrModeMock}</Text>
+            <Text style={styles.debugLabel}>{t.backendOcrUrl}</Text>
+            <Text selectable style={styles.debugValue}>{BACKEND_OCR_URL}</Text>
+            <Text style={styles.debugLabel}>{t.backendHealthUrl}</Text>
+            <Text selectable style={styles.debugValue}>{BACKEND_HEALTH_URL}</Text>
+            {backendHealthResult ? <Text selectable style={styles.debugResult}>{backendHealthResult}</Text> : null}
+            {lastOcrError ? <Text selectable style={styles.errorText}>{lastOcrError}</Text> : null}
+          </View>
+          <Pressable
+            disabled={isLoading}
+            style={[styles.scanTestButton, isLoading && styles.disabledButton]}
+            onPress={onTestBackend}
+          >
+            <Text style={styles.scanTestButtonText}>{t.testBackend}</Text>
+          </Pressable>
+        </>
+      ) : null}
       <Text style={styles.subtleText}>{t.chooseImageHint}</Text>
       <Pressable disabled={isLoading} style={[styles.primaryButton, isLoading && styles.disabledButton]} onPress={onPickImage}>
         <Text style={styles.primaryButtonText}>{imageUri ? t.changeImage : t.pickImage}</Text>
@@ -718,6 +803,7 @@ function DetailScreen({
   isSavingStatus,
   t,
   onChange,
+  onPreparePayment,
   onUpdateStatus,
   onSave,
 }: {
@@ -725,7 +811,8 @@ function DetailScreen({
   isSavingStatus: boolean;
   t: Translation;
   onChange: (document: ScannedDocument) => void;
-  onUpdateStatus: (status: Extract<PaymentStatus, 'paid' | 'disputed' | 'closed'>) => Promise<void>;
+  onPreparePayment: () => void;
+  onUpdateStatus: (status: Extract<PaymentStatus, 'expected' | 'paid' | 'received' | 'disputed' | 'closed'>) => Promise<void>;
   onSave: (document: ScannedDocument) => Promise<void>;
 }) {
   const updateAndSave = async (updates: Partial<ScannedDocument>) => {
@@ -749,10 +836,33 @@ function DetailScreen({
       <ImagePreview imageUri={document.imageUri} t={t} />
 
       <View style={styles.actionRow}>
-        <AppButton label={t.markAsPaid} disabled={isSavingStatus} onPress={() => onUpdateStatus('paid')} />
+        {document.cashflowType === 'payable' ? (
+          <>
+            {canPreparePayment(document) ? (
+              <AppButton label={t.preparePayment} disabled={isSavingStatus} onPress={onPreparePayment} />
+            ) : null}
+            <AppButton label={t.markAsPaid} disabled={isSavingStatus} onPress={() => onUpdateStatus('paid')} />
+          </>
+        ) : null}
+        {document.cashflowType === 'unknown' && canPreparePayment(document) ? (
+          <AppButton label={t.preparePayment} disabled={isSavingStatus} onPress={onPreparePayment} />
+        ) : null}
+        {document.cashflowType === 'receivable' ? (
+          <>
+            <AppButton label={t.markAsExpected} disabled={isSavingStatus} onPress={() => onUpdateStatus('expected')} />
+            <AppButton label={t.markAsReceived} disabled={isSavingStatus} onPress={() => onUpdateStatus('received')} />
+          </>
+        ) : null}
         <AppButton label={t.markAsDisputed} disabled={isSavingStatus} onPress={() => onUpdateStatus('disputed')} />
         <AppButton label={t.markAsClosed} disabled={isSavingStatus} onPress={() => onUpdateStatus('closed')} />
       </View>
+
+      {document.cashflowType === 'receivable' ? (
+        <View style={styles.receivableHighlight}>
+          <Text style={styles.detailLabel}>{t.expectedReimbursement}</Text>
+          <Text style={styles.receivableAmount}>{document.amountReceivable || document.amountTotal || '-'}</Text>
+        </View>
+      ) : null}
 
       <Text style={styles.inputLabel}>{t.paymentNote}</Text>
       <TextInput
@@ -819,6 +929,105 @@ function DetailScreen({
   );
 }
 
+function PaymentPreparationScreen({
+  document,
+  isSavingStatus,
+  t,
+  onMarkAsPaid,
+}: {
+  document: ScannedDocument;
+  isSavingStatus: boolean;
+  t: Translation;
+  onMarkAsPaid: () => void | Promise<void>;
+}) {
+  const recipient = getPaymentRecipient(document);
+  const paymentReference = getPaymentReference(document);
+  const warnings = [
+    !document.iban ? t.paymentPreparationWarnings.missingIban : null,
+    !document.amountTotal ? t.paymentPreparationWarnings.missingAmount : null,
+    !paymentReference ? t.paymentPreparationWarnings.checkPaymentReference : null,
+    !recipient ? t.paymentPreparationWarnings.checkRecipient : null,
+  ].filter(Boolean) as string[];
+
+  const copyValue = async (value: string, label: string) => {
+    if (!value) {
+      return;
+    }
+
+    await copyToClipboard(value);
+    Alert.alert(t.paymentPreparationTitle, `${label}: ${t.copied}`);
+  };
+
+  return (
+    <ScrollView contentContainerStyle={styles.scrollContent}>
+      <Text style={styles.screenTitle}>{t.paymentPreparationTitle}</Text>
+      <Text style={styles.paymentSafetyNote}>{t.paymentPreparationSafetyNote}</Text>
+
+      <View style={styles.paymentPreparationPanel}>
+        <PaymentPreparationRow label={t.paymentTransferLabels.recipient} value={recipient} />
+        <PaymentPreparationRow label={t.paymentTransferLabels.iban} value={document.iban} />
+        <PaymentPreparationRow label={t.paymentTransferLabels.amount} value={document.amountTotal} />
+        <PaymentPreparationRow label={t.paymentTransferLabels.reference} value={paymentReference} />
+        <PaymentPreparationRow label={t.paymentTransferLabels.dueDate} value={document.dueDate} />
+      </View>
+
+      <View style={styles.copyButtonGroup}>
+        <AppButton
+          label={t.copyRecipient}
+          disabled={!recipient}
+          onPress={() => copyValue(recipient, t.paymentTransferLabels.recipient)}
+        />
+        <AppButton
+          label={t.copyIban}
+          disabled={!document.iban}
+          onPress={() => copyValue(document.iban, t.paymentTransferLabels.iban)}
+        />
+        <AppButton
+          label={t.copyAmount}
+          disabled={!document.amountTotal}
+          onPress={() => copyValue(document.amountTotal, t.paymentTransferLabels.amount)}
+        />
+        <AppButton
+          label={t.copyPaymentReference}
+          disabled={!paymentReference}
+          onPress={() => copyValue(paymentReference, t.paymentTransferLabels.reference)}
+        />
+      </View>
+
+      <View style={styles.warningList}>
+        {warnings.map((warning) => (
+          <Text key={warning} style={styles.warningText}>
+            {warning}
+          </Text>
+        ))}
+      </View>
+
+      <View style={styles.sepaQrPlaceholder}>
+        <Text style={styles.sepaQrPlaceholderText}>{t.sepaQrComing}</Text>
+      </View>
+
+      <Pressable
+        disabled={isSavingStatus}
+        style={[styles.primaryButton, isSavingStatus && styles.disabledButton]}
+        onPress={onMarkAsPaid}
+      >
+        <Text style={styles.primaryButtonText}>{t.markAsPaid}</Text>
+      </Pressable>
+    </ScrollView>
+  );
+}
+
+function PaymentPreparationRow({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.paymentPreparationRow}>
+      <Text style={styles.detailLabel}>{label}</Text>
+      <Text selectable style={styles.detailValue}>
+        {value || '-'}
+      </Text>
+    </View>
+  );
+}
+
 function AppButton({
   label,
   disabled,
@@ -862,7 +1071,15 @@ function DocumentForm({
     <View>
       {fieldOrder.map((field) => {
         const options =
-          field === 'documentType' ? documentTypeValues : field === 'paymentStatus' ? paymentStatusValues : field === 'urgencyLevel' ? urgencyLevelValues : null;
+          field === 'documentType'
+            ? documentTypeValues
+            : field === 'paymentStatus'
+              ? paymentStatusValues
+              : field === 'cashflowType'
+                ? cashflowTypeValues
+                : field === 'urgencyLevel'
+                  ? urgencyLevelValues
+                  : null;
         const label = t.fields[field];
 
         return (
@@ -886,7 +1103,9 @@ function DocumentForm({
                         ? getDocumentTypeLabel(t, option as DocumentType)
                         : field === 'paymentStatus'
                           ? getPaymentStatusLabel(t, option as ScannedDocument['paymentStatus'])
-                          : getUrgencyLevelLabel(t, option as ScannedDocument['urgencyLevel'])}
+                          : field === 'cashflowType'
+                            ? getCashflowTypeLabel(t, option as ScannedDocument['cashflowType'])
+                            : getUrgencyLevelLabel(t, option as ScannedDocument['urgencyLevel'])}
                     </Text>
                   </Pressable>
                 ))}
@@ -911,8 +1130,9 @@ function ExpenseSummarySection({ summary, t }: { summary: ExpenseSummary; t: Tra
     <View style={styles.summarySection}>
       <Text style={styles.sectionTitle}>{t.expenseSummary}</Text>
       <View style={styles.summaryGrid}>
-        <SummaryTile label={t.openAmount} value={formatEuro(summary.openAmount)} />
-        <SummaryTile label={t.paidAmountThisMonth} value={formatEuro(summary.paidAmountThisMonth)} />
+        <SummaryTile label={t.openPayableAmount} value={formatEuro(summary.openAmount)} />
+        <SummaryTile label={t.expectedReceivableAmount} value={formatEuro(summary.expectedReceivableAmount)} />
+        <SummaryTile label={t.paidOrReceivedThisMonth} value={formatEuro(summary.paidOrReceivedThisMonth)} />
         <SummaryTile label={t.openInvoiceCount} value={String(summary.openInvoiceCount)} />
       </View>
       <Text style={styles.categoryBreakdownTitle}>{t.categoryBreakdown}</Text>
@@ -933,14 +1153,14 @@ function ExpenseSummarySection({ summary, t }: { summary: ExpenseSummary; t: Tra
                 </Text>
               </View>
               <View style={styles.categoryMetric}>
-                <Text style={styles.categoryMetricLabel}>{t.categoryPaidAmountThisMonth}</Text>
+                <Text style={styles.categoryMetricLabel}>{t.categoryPaidOrReceivedThisMonth}</Text>
                 <Text
                   numberOfLines={1}
                   adjustsFontSizeToFit
                   minimumFontScale={0.72}
                   style={styles.categoryMetricValue}
                 >
-                  {formatEuro(item.paidAmountThisMonth)}
+                  {formatEuro(item.paidOrReceivedThisMonth)}
                 </Text>
               </View>
             </View>
@@ -972,7 +1192,7 @@ function ExpenseReviewFields({
   onChange: (document: ScannedDocument) => void;
 }) {
   const toggleField = (field: 'taxRelevant' | 'reimbursable') => {
-    onChange({ ...document, [field]: !document[field], isExpense: true });
+    onChange({ ...document, [field]: !document[field], isExpense: document.cashflowType === 'payable' });
   };
 
   return (
@@ -990,7 +1210,7 @@ function ExpenseReviewFields({
             <Pressable
               key={option}
               style={[styles.pill, document.expenseCategory === option && styles.pillSelected]}
-              onPress={() => onChange({ ...document, expenseCategory: option, isExpense: true })}
+              onPress={() => onChange({ ...document, expenseCategory: option, isExpense: document.cashflowType === 'payable' })}
             >
               <Text style={[styles.pillText, document.expenseCategory === option && styles.pillTextSelected]}>
                 {getExpenseCategoryLabel(t, option)}
@@ -1033,6 +1253,14 @@ function DocumentRow({
   onPress: () => void;
   urgent?: boolean;
 }) {
+  const displayedAmount = document.cashflowType === 'receivable'
+    ? document.amountReceivable || document.amountTotal || '-'
+    : document.amountTotal || '-';
+  const dateLabel = document.cashflowType === 'receivable' ? t.expectedReimbursement : t.due;
+  const dateValue = document.cashflowType === 'receivable'
+    ? document.expectedPaymentDate || '-'
+    : document.dueDate || '-';
+
   return (
     <Pressable style={[styles.documentRow, urgent && styles.urgentRow]} onPress={onPress}>
       <View style={styles.documentTextBlock}>
@@ -1042,8 +1270,8 @@ function DocumentRow({
         </Text>
       </View>
       <View style={styles.amountBlock}>
-        <Text style={styles.amountText}>{document.amountTotal || '-'}</Text>
-        <Text style={styles.dueText}>{t.due} {document.dueDate || '-'}</Text>
+        <Text style={styles.amountText}>{displayedAmount}</Text>
+        <Text style={styles.dueText}>{dateLabel} {dateValue}</Text>
       </View>
     </Pressable>
   );
@@ -1207,6 +1435,12 @@ const styles = StyleSheet.create({
     lineHeight: 23,
     marginBottom: 12,
     textAlign: 'center',
+  },
+  paymentSafetyNote: {
+    color: '#536260',
+    fontSize: 15,
+    lineHeight: 22,
+    marginBottom: 14,
   },
   modeBadge: {
     backgroundColor: '#ffffff',
@@ -1580,6 +1814,69 @@ const styles = StyleSheet.create({
     color: '#153433',
     fontSize: 15,
     fontWeight: '700',
+  },
+  receivableHighlight: {
+    backgroundColor: '#eef6f4',
+    borderColor: '#0d5c63',
+    borderRadius: 8,
+    borderWidth: 1,
+    marginBottom: 14,
+    padding: 14,
+  },
+  receivableAmount: {
+    color: '#0d5c63',
+    fontSize: 22,
+    fontWeight: '800',
+  },
+  paymentPreparationPanel: {
+    backgroundColor: '#ffffff',
+    borderColor: '#e5ddd1',
+    borderRadius: 8,
+    borderWidth: 1,
+    marginBottom: 14,
+    overflow: 'hidden',
+  },
+  paymentPreparationRow: {
+    borderBottomColor: '#e5ddd1',
+    borderBottomWidth: 1,
+    padding: 12,
+  },
+  copyButtonGroup: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginBottom: 12,
+  },
+  warningList: {
+    gap: 8,
+    marginBottom: 14,
+  },
+  warningText: {
+    backgroundColor: '#fff7e8',
+    borderColor: '#e3b35c',
+    borderRadius: 8,
+    borderWidth: 1,
+    color: '#6b4608',
+    fontSize: 14,
+    fontWeight: '800',
+    padding: 12,
+  },
+  sepaQrPlaceholder: {
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    borderColor: '#bdc9c4',
+    borderRadius: 8,
+    borderStyle: 'dashed',
+    borderWidth: 1,
+    justifyContent: 'center',
+    marginBottom: 8,
+    minHeight: 96,
+    padding: 16,
+  },
+  sepaQrPlaceholderText: {
+    color: '#536260',
+    fontSize: 16,
+    fontWeight: '800',
   },
   checklist: {
     marginTop: 4,

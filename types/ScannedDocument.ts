@@ -11,19 +11,23 @@ export type DocumentType =
   | 'tax_letter'
   | 'payment_reminder'
   | 'inkasso_letter'
+  | 'payment_proof'
   | 'subscription_bill'
   | 'unknown';
 
 export type PaymentStatus =
   | 'needs_review'
   | 'unpaid'
+  | 'expected'
   | 'paid'
+  | 'received'
   | 'sent_to_insurance'
   | 'waiting_reimbursement'
   | 'disputed'
   | 'closed';
 
 export type UrgencyLevel = 'low' | 'medium' | 'high' | 'critical';
+export type CashflowType = 'payable' | 'receivable' | 'neutral' | 'unknown';
 
 export type ExpenseCategory =
   | 'housing'
@@ -69,16 +73,20 @@ export type ScannedDocument = {
   paymentStatus: PaymentStatus;
   senderName: string;
   creditorName: string;
+  payerName: string;
   branchCategory: string;
   amountTotal: string;
+  amountReceivable: string;
   originalAmount: string;
   dueDate: string;
+  expectedPaymentDate: string;
   invoiceDate: string;
   invoiceNumber: string;
   customerNumber: string;
   iban: string;
   bic: string;
   paymentReference: string;
+  paymentRecipient?: string;
   documentLanguage: string;
   urgencyLevel: UrgencyLevel;
   paymentNote: string;
@@ -87,9 +95,11 @@ export type ScannedDocument = {
   expenseCategory: ExpenseCategory;
   isExpense: boolean;
   paidDate: string;
+  receivedDate: string;
   paymentMethod: PaymentMethod;
   taxRelevant: boolean;
   reimbursable: boolean;
+  cashflowType: CashflowType;
   ocrSource: OcrSource;
 };
 
@@ -106,6 +116,7 @@ export const documentTypeValues: DocumentType[] = [
   'tax_letter',
   'payment_reminder',
   'inkasso_letter',
+  'payment_proof',
   'subscription_bill',
   'unknown',
 ];
@@ -113,7 +124,9 @@ export const documentTypeValues: DocumentType[] = [
 export const paymentStatusValues: PaymentStatus[] = [
   'needs_review',
   'unpaid',
+  'expected',
   'paid',
+  'received',
   'sent_to_insurance',
   'waiting_reimbursement',
   'disputed',
@@ -121,6 +134,7 @@ export const paymentStatusValues: PaymentStatus[] = [
 ];
 
 export const urgencyLevelValues: UrgencyLevel[] = ['low', 'medium', 'high', 'critical'];
+export const cashflowTypeValues: CashflowType[] = ['payable', 'receivable', 'neutral', 'unknown'];
 
 export const expenseCategoryValues: ExpenseCategory[] = [
   'housing',

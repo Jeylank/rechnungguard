@@ -41,6 +41,7 @@ const branchCategoryValues = [
   'water',
   'telecom',
   'insurance',
+  'health_insurance',
   'rent',
   'government_tax',
   'online_order',
@@ -53,7 +54,9 @@ const paymentStatusValues = [
   'unknown',
   'needs_review',
   'unpaid',
+  'expected',
   'paid',
+  'received',
   'sent_to_insurance',
   'waiting_reimbursement',
   'disputed',
@@ -61,6 +64,7 @@ const paymentStatusValues = [
 ];
 
 const urgencyLevelValues = ['unknown', 'low', 'medium', 'high', 'critical'];
+const cashflowTypeValues = ['payable', 'receivable', 'neutral', 'unknown'];
 
 const expenseCategoryValues = [
   'unknown',
@@ -90,8 +94,11 @@ const mockOcrDocument = {
   paymentStatus: 'needs_review',
   senderName: 'ConnectTel GmbH',
   creditorName: 'ConnectTel GmbH',
+  payerName: null,
   amountTotal: '49,95 EUR',
+  amountReceivable: null,
   dueDate: '2026-05-25',
+  expectedPaymentDate: null,
   invoiceDate: '2026-05-01',
   invoiceNumber: 'RG-2026-1001',
   customerNumber: 'K-123456',
@@ -102,6 +109,8 @@ const mockOcrDocument = {
   urgencyLevel: 'medium',
   expenseCategory: 'telecom',
   isExpense: true,
+  cashflowType: 'payable',
+  receivedDate: null,
 };
 
 const scannedDocumentSchema = {
@@ -114,8 +123,11 @@ const scannedDocumentSchema = {
     'paymentStatus',
     'senderName',
     'creditorName',
+    'payerName',
     'amountTotal',
+    'amountReceivable',
     'dueDate',
+    'expectedPaymentDate',
     'invoiceDate',
     'invoiceNumber',
     'customerNumber',
@@ -126,6 +138,8 @@ const scannedDocumentSchema = {
     'urgencyLevel',
     'expenseCategory',
     'isExpense',
+    'cashflowType',
+    'receivedDate',
   ],
   properties: {
     documentType: {
@@ -151,13 +165,25 @@ const scannedDocumentSchema = {
       ...nullableStringSchema,
       description: 'Payment recipient or original creditor. For Inkasso, extract the original creditor/client/Auftraggeber if visible; otherwise null.',
     },
+    payerName: {
+      ...nullableStringSchema,
+      description: 'Expected payer for receivable documents, such as Finanzamt, insurer, shop, or other refund issuer. Use null for payable documents or when absent.',
+    },
     amountTotal: {
       ...nullableStringSchema,
       description: 'Total amount currently payable, including currency and fees when visible. Do not calculate from partial lines unless the total is explicitly clear.',
     },
+    amountReceivable: {
+      ...nullableStringSchema,
+      description: 'Amount expected to be paid to the user for refunds, reimbursements, credit notes, or positive balances, including currency when visible.',
+    },
     dueDate: {
       ...nullableStringSchema,
       description: 'Payment due date in YYYY-MM-DD. Use null when not visible or not derivable from an explicit visible date plus clear payment term.',
+    },
+    expectedPaymentDate: {
+      ...nullableStringSchema,
+      description: 'Expected incoming payment date in YYYY-MM-DD for receivable documents. Use null when not visible or not derivable.',
     },
     invoiceDate: {
       ...nullableStringSchema,
@@ -201,43 +227,115 @@ const scannedDocumentSchema = {
       type: ['boolean', 'null'],
       description: 'true for payment requests/claims against the user, false for clear credit/refund/info-only letters, null if unclear.',
     },
+    cashflowType: {
+      type: 'string',
+      enum: cashflowTypeValues,
+      description: 'payable for money the user should pay, receivable for money the user should receive, neutral for information-only documents, unknown if unclear.',
+    },
+    receivedDate: {
+      ...nullableStringSchema,
+      description: 'Date the incoming payment was already received in YYYY-MM-DD when visible. Use null otherwise.',
+    },
   },
 };
 
 const stringOrNull = (value) => (typeof value === 'string' && value.trim() ? value : null);
 const enumOrFallback = (value, values, fallback) => (values.includes(value) ? value : fallback);
+const healthInsurancePattern = /\b(?:dak|aok|tk|techniker\s+krankenkasse|barmer|krankenkasse|gesundheit|pflegeversicherung)\b/i;
+const receivablePattern = /\b(?:steuererstattung|erstattung|rueckerstattung|rückerstattung|guthaben|gutschrift|wird\s+ueberwiesen|wird\s+überwiesen|zu\s+ihren\s+gunsten)\b/i;
 
-const normalizeOcrDocument = (document) => ({
-  documentType: enumOrFallback(document.documentType, documentTypeValues, 'unknown'),
-  branchCategory: enumOrFallback(document.branchCategory, branchCategoryValues, 'unknown'),
-  paymentStatus: enumOrFallback(document.paymentStatus, paymentStatusValues, 'unknown'),
-  senderName: stringOrNull(document.senderName),
-  creditorName: stringOrNull(document.creditorName),
-  amountTotal: stringOrNull(document.amountTotal),
-  dueDate: stringOrNull(document.dueDate),
-  invoiceDate: stringOrNull(document.invoiceDate),
-  invoiceNumber: stringOrNull(document.invoiceNumber),
-  customerNumber: stringOrNull(document.customerNumber),
-  iban: stringOrNull(document.iban),
-  bic: stringOrNull(document.bic),
-  paymentReference: stringOrNull(document.paymentReference),
-  documentLanguage: typeof document.documentLanguage === 'string' && document.documentLanguage.trim() ? document.documentLanguage : 'de',
-  urgencyLevel: enumOrFallback(document.urgencyLevel, urgencyLevelValues, 'unknown'),
-  expenseCategory: enumOrFallback(document.expenseCategory, expenseCategoryValues, 'unknown'),
-  isExpense: typeof document.isExpense === 'boolean' ? document.isExpense : null,
-});
+const isKnownHealthInsurerDocument = (document) => {
+  const searchableText = [
+    document.senderName,
+    document.creditorName,
+    document.paymentReference,
+    document.invoiceNumber,
+    document.customerNumber,
+    document.branchCategory,
+    document.expenseCategory,
+  ]
+    .filter((value) => typeof value === 'string')
+    .join(' ');
+
+  return healthInsurancePattern.test(searchableText);
+};
+
+const isReceivableDocument = (document) => {
+  const searchableText = [
+    document.senderName,
+    document.creditorName,
+    document.payerName,
+    document.paymentReference,
+    document.amountReceivable,
+    document.branchCategory,
+    document.documentType,
+  ]
+    .filter((value) => typeof value === 'string')
+    .join(' ');
+
+  return receivablePattern.test(searchableText);
+};
+
+const normalizeOcrDocument = (document) => {
+  const normalizedDocument = {
+    documentType: enumOrFallback(document.documentType, documentTypeValues, 'unknown'),
+    branchCategory: enumOrFallback(document.branchCategory, branchCategoryValues, 'unknown'),
+    paymentStatus: enumOrFallback(document.paymentStatus, paymentStatusValues, 'unknown'),
+    senderName: stringOrNull(document.senderName),
+    creditorName: stringOrNull(document.creditorName),
+    payerName: stringOrNull(document.payerName),
+    amountTotal: stringOrNull(document.amountTotal),
+    amountReceivable: stringOrNull(document.amountReceivable),
+    dueDate: stringOrNull(document.dueDate),
+    expectedPaymentDate: stringOrNull(document.expectedPaymentDate),
+    invoiceDate: stringOrNull(document.invoiceDate),
+    invoiceNumber: stringOrNull(document.invoiceNumber),
+    customerNumber: stringOrNull(document.customerNumber),
+    iban: stringOrNull(document.iban),
+    bic: stringOrNull(document.bic),
+    paymentReference: stringOrNull(document.paymentReference),
+    documentLanguage: typeof document.documentLanguage === 'string' && document.documentLanguage.trim() ? document.documentLanguage : 'de',
+    urgencyLevel: enumOrFallback(document.urgencyLevel, urgencyLevelValues, 'unknown'),
+    expenseCategory: enumOrFallback(document.expenseCategory, expenseCategoryValues, 'unknown'),
+    isExpense: typeof document.isExpense === 'boolean' ? document.isExpense : null,
+    cashflowType: enumOrFallback(document.cashflowType, cashflowTypeValues, 'unknown'),
+    receivedDate: stringOrNull(document.receivedDate),
+  };
+
+  if (isReceivableDocument({ ...document, ...normalizedDocument })) {
+    normalizedDocument.cashflowType = 'receivable';
+    normalizedDocument.paymentStatus =
+      normalizedDocument.paymentStatus === 'received' ? 'received' : 'expected';
+    normalizedDocument.isExpense = false;
+    normalizedDocument.payerName =
+      normalizedDocument.payerName || normalizedDocument.senderName || normalizedDocument.creditorName;
+    normalizedDocument.amountReceivable = normalizedDocument.amountReceivable || normalizedDocument.amountTotal;
+    normalizedDocument.amountTotal = null;
+  }
+
+  if (isKnownHealthInsurerDocument({ ...document, ...normalizedDocument })) {
+    normalizedDocument.documentType =
+      normalizedDocument.documentType === 'invoice' ? 'invoice' : 'insurance_document';
+    normalizedDocument.branchCategory = 'health_insurance';
+    normalizedDocument.expenseCategory = 'insurance';
+  }
+
+  return normalizedDocument;
+};
 
 const getDataUrl = (file) => `data:${file.mimetype};base64,${file.buffer.toString('base64')}`;
 
 const ocrSystemPrompt = [
   'Du extrahierst strukturierte Daten aus deutschen Zahlungsdokumenten fuer RechnungGuard.',
-  'Unterstuetzte Dokumente: Rechnung, Mahnung, Inkasso-Schreiben, Strom/Gas/Wasser, Telekommunikation, Versicherung, Miete, Behoerde/Steuer und Online-Bestellung.',
+  'Unterstuetzte Dokumente: Rechnung, Mahnung, Inkasso-Schreiben, Strom/Gas/Wasser, Telekommunikation, Versicherung/Krankenversicherung, Miete, Behoerde/Steuer und Online-Bestellung.',
   'Antworte ausschliesslich mit einem JSON-Objekt, ohne Markdown, ohne Erklaertext und ohne zusaetzliche Felder.',
   'Halte dich exakt an das JSON-Schema. Verwende fuer nicht erkennbare Text- und Datumsfelder null. Verwende unknown fuer unklare Kategorien oder Statuswerte, wenn das Schema unknown erlaubt.',
   'Erfinde keine Absender, Glaeubiger, urspruenglichen Glaeubiger, Kundennummern, IBANs, BICs, Rechnungsnummern, Aktenzeichen, Betrage, Faelligkeitsdaten oder Rechnungsdaten.',
   'Wenn ein Wert nicht sichtbar oder nur geraten waere, gib null fuer Text-/Datumsfelder oder unknown fuer Enum-Felder zurueck.',
   'Datumswerte muessen im Format YYYY-MM-DD stehen. Wenn ein Datum nicht eindeutig lesbar ist, verwende null.',
   'Inferiere dueDate nur, wenn klare Zahlungsbedingungen sichtbar sind, zum Beispiel "zahlbar innerhalb von 14 Tagen" plus eindeutiges Rechnungsdatum. Wenn die Basis oder Frist unklar ist, dueDate null.',
+  'Unterscheide die Geldrichtung: Rechnung, Bill, Mahnung und Inkasso sind cashflowType payable. Steuererstattung, Erstattung, Rueckerstattung, Guthaben, Gutschrift, "wird ueberwiesen" und "zu Ihren Gunsten" sind cashflowType receivable. Reine Informationsschreiben oder Vertraege ohne Zahlung sind neutral. Wenn unklar, unknown.',
+  'Bei receivable: amountReceivable ist der erwartete Zahlungseingang, payerName ist die Stelle, die an den Nutzer zahlt, expectedPaymentDate ist der erwartete Zahlungstermin falls sichtbar. amountTotal soll null sein, wenn kein Betrag zu zahlen ist. paymentStatus ist expected, oder received wenn ein erfolgter Zahlungseingang sichtbar ist.',
   'Priorisiere explizite Zahlungsbereiche: "Bitte ueberweisen Sie", "Zahlbar bis", "Faellig am", "Verwendungszweck", "SEPA-Lastschrift", "Zahlteil", "Empfaenger", "IBAN", "BIC", "Kassenzeichen", "Vertragskonto", "Aktenzeichen".',
   'Erkenne Inkasso-Schreiben separat als documentType inkasso_letter und branchCategory inkasso. Inkasso liegt vor, wenn ein Inkassounternehmen, Forderungsbeitreibung, Aktenzeichen, Vollmacht, Inkassokosten oder aehnliche Formulierungen sichtbar sind.',
   'Bei Inkasso: senderName ist das Inkassounternehmen oder die Kanzlei. creditorName ist der urspruengliche Glaeubiger/Auftraggeber/Mandant, falls sichtbar, zum Beispiel "Forderung der Stadtwerke Beispiel GmbH" oder "Auftraggeber: ConnectTel GmbH"; sonst null. amountTotal ist die aktuell geforderte Gesamtsumme inklusive Inkassokosten, falls sichtbar.',
@@ -248,22 +346,25 @@ const ocrSystemPrompt = [
   'Bei Telekom/Internet/Mobilfunk: documentType telecom_bill, branchCategory telecom, expenseCategory telecom. Achte auf Rechnungsnummer, Kundennummer, Vertragskonto, Leistungszeitraum und SEPA-Lastschrift.',
   'Bei Miete/Nebenkosten: documentType rent_letter, branchCategory rent, expenseCategory housing. Achte auf Vermieter/Hausverwaltung, Mieterkonto, Objekt/Adresse, Nebenkostenabrechnung, Nachzahlung und Zahlungsfrist.',
   'Bei Versicherung: documentType insurance_document, branchCategory insurance, expenseCategory insurance. Achte auf Versicherungsschein-/Vertragsnummer, Beitragsrechnung, Schaden-/Leistungsnummer, Beitrag und Faelligkeit.',
+  'Bei gesetzlicher Krankenversicherung oder Pflegeversicherung: DAK, DAK-Gesundheit, AOK, TK, Techniker Krankenkasse, Barmer, Krankenkasse, Gesundheit und Pflegeversicherung sind Versicherungsdokumente. Nutze documentType insurance_document oder invoice, branchCategory health_insurance, expenseCategory insurance.',
   'Bei Behoerde/Steuer: documentType government_letter oder tax_letter, branchCategory government_tax, expenseCategory tax_government. Achte auf Finanzamt, Stadt/Gemeinde, Bescheid, Kassenzeichen, Steuernummer, Aktenzeichen, Zahlungsfrist und Bankverbindung.',
   'amountTotal ist der zu zahlende Gesamtbetrag inklusive Waehrung, zum Beispiel "49,95 EUR". IBAN und BIC muessen exakt aus dem Dokument uebernommen werden.',
   'paymentReference ist der angegebene Verwendungszweck, Mandatsreferenz, Kundennummer/Rechnungsnummer-Kombination oder Zahlungsreferenz. Wenn kein klarer Verwendungszweck genannt ist, null.',
   'documentType-Wahl: invoice fuer Rechnung, payment_reminder fuer Mahnung/Zahlungserinnerung, inkasso_letter fuer Inkasso, utility_bill fuer Strom/Gas/Wasser/Energie, telecom_bill fuer Telekom/Internet/Mobilfunk, insurance_document fuer Versicherung, rent_letter fuer Miete/Nebenkosten, government_letter oder tax_letter fuer Behoerde/Steuer, receipt fuer Quittung/Beleg, subscription_bill fuer Abo, unknown wenn unklar.',
-  'branchCategory-Wahl: energy fuer Strom/Gas, water fuer Wasser, telecom fuer Telekommunikation, insurance fuer Versicherung, rent fuer Miete/Nebenkosten, government_tax fuer Behoerde/Steuer, online_order fuer Online-Bestellung, inkasso fuer Inkasso, reminder fuer reine Mahnung ohne erkennbare Branche, general_invoice fuer allgemeine Rechnung, health fuer medizinische Dokumente, other fuer sonstige klare Branche, unknown wenn unklar.',
+  'branchCategory-Wahl: energy fuer Strom/Gas, water fuer Wasser, telecom fuer Telekommunikation, insurance fuer Versicherung, health_insurance fuer gesetzliche Krankenversicherung/Pflegeversicherung wie DAK, AOK, TK oder Barmer, rent fuer Miete/Nebenkosten, government_tax fuer Behoerde/Steuer, online_order fuer Online-Bestellung, inkasso fuer Inkasso, reminder fuer reine Mahnung ohne erkennbare Branche, general_invoice fuer allgemeine Rechnung, health fuer medizinische Dokumente, other fuer sonstige klare Branche, unknown wenn unklar.',
   'paymentStatus-Wahl: paid nur bei sichtbarem Bezahlt-Hinweis, unpaid bei offener Zahlungsaufforderung, needs_review bei unklarer Zahlungsaufforderung, disputed bei Widerspruch/Streitfall, sent_to_insurance oder waiting_reimbursement nur bei klarer Versicherungsabwicklung, closed bei eindeutig abgeschlossen, unknown wenn nicht beurteilbar.',
+  'paymentStatus fuer receivable: expected fuer erwartete Erstattung/Gutschrift/Zahlung an den Nutzer, received fuer bereits erhaltene Zahlung. Nutze unpaid nicht fuer receivable.',
   'urgencyLevel-Wahl: critical bei Inkasso, letzter Mahnung, gerichtlicher Androhung, Sperrandrohung oder sehr kurzer/ueberschrittener Frist; high bei Mahnung oder bald faelliger Zahlung; medium bei normaler offener Rechnung; low bei Beleg/Info ohne akuten Handlungsdruck; unknown wenn nicht beurteilbar.',
   'expenseCategory-Wahl: housing, energy, telecom, insurance, health, transport, shopping, subscriptions, tax_government, education, travel, legal, other oder unknown passend zum Dokument.',
   'isExpense ist true, wenn das Dokument wahrscheinlich eine Ausgabe oder Forderung gegen den Nutzer ist; false nur bei eindeutigem Guthaben, Erstattung oder reinem Informationsschreiben; null wenn unklar.',
+  'cashflowType-Wahl: payable fuer Geld, das der Nutzer zahlen soll; receivable fuer Geld, das der Nutzer erhalten soll; neutral fuer reine Information; unknown wenn unklar.',
   'Beispiele fuer Klassifikation: "Stadtwerke Abschlagsplan Strom/Gas, Vertragskonto, Betrag faellig" => utility_bill/energy/unpaid/energy. "Vodafone/Telekom Rechnung, Kundennummer, zahlbar per Lastschrift" => telecom_bill/telecom/unpaid/telecom. "Nebenkostenabrechnung mit Nachzahlung an Hausverwaltung" => rent_letter/rent/unpaid/housing. "Finanzamt Einkommensteuerbescheid mit Kassenzeichen und Zahlung bis" => tax_letter/government_tax/unpaid/tax_government. "Mahnung zur offenen Stromrechnung" => payment_reminder/energy/unpaid/high. "Inkasso im Auftrag von ConnectTel GmbH, Aktenzeichen, Gesamtforderung" => inkasso_letter/inkasso/unpaid/critical/legal und creditorName ConnectTel GmbH, wenn sichtbar.',
 ].join(' ');
 
 const ocrUserPrompt = [
   'Lies das Bild sorgfaeltig und extrahiere die Felder fuer RechnungGuard.',
   'Beruecksichtige Kopfbereich, Fussbereich, Zahlungsabschnitt, QR-/SEPA-Abschnitt, Tabellen, Mahntext und Inkasso-Aktenzeichen.',
-  'Pruefe besonders senderName, creditorName, amountTotal, dueDate, invoiceDate, invoiceNumber, customerNumber, iban, bic, paymentReference, documentType, branchCategory, paymentStatus, urgencyLevel, expenseCategory und isExpense.',
+  'Pruefe besonders senderName, creditorName, payerName, amountTotal, amountReceivable, dueDate, expectedPaymentDate, invoiceDate, invoiceNumber, customerNumber, iban, bic, paymentReference, documentType, branchCategory, paymentStatus, urgencyLevel, expenseCategory, cashflowType und isExpense.',
   'Suche bei Inkasso explizit nach urspruenglichem Glaeubiger, Mandant, Auftraggeber, Forderung aus, Vertragskonto oder Waren-/Dienstleistername.',
   'Suche bei Strom/Gas/Wasser, Telekom, Miete, Versicherung und Behoerde/Steuer nach branchenspezifischen Referenzen wie Vertragskonto, Kundennummer, Mieterkonto, Versicherungsschein, Kassenzeichen, Steuernummer, Aktenzeichen und Verwendungszweck.',
   'Gib null zurueck, wenn IBAN, Rechnungsnummer, Faelligkeit oder urspruenglicher Glaeubiger nicht sichtbar sind.',

@@ -1,5 +1,6 @@
 import {
   createEmptyInkassoChecklist,
+  cashflowTypeValues,
   documentTypeValues,
   expenseCategoryValues,
   paymentStatusValues,
@@ -27,10 +28,13 @@ type MockOcrExample = {
   paymentStatus: ScannedDocument['paymentStatus'];
   senderName: string;
   creditorName: string;
+  payerName: string;
   branchCategory: string;
   amountTotal: string;
+  amountReceivable: string;
   originalAmount: string;
   dueInDays: number;
+  expectedPaymentInDays: number;
   invoiceAgeDays: number;
   invoiceNumber: string;
   customerNumber: string;
@@ -41,6 +45,7 @@ type MockOcrExample = {
   expenseCategory: ScannedDocument['expenseCategory'];
   taxRelevant: boolean;
   reimbursable: boolean;
+  cashflowType: ScannedDocument['cashflowType'];
 };
 
 type BackendOcrResponse = Partial<
@@ -50,16 +55,20 @@ type BackendOcrResponse = Partial<
     | 'paymentStatus'
     | 'senderName'
     | 'creditorName'
+    | 'payerName'
     | 'branchCategory'
     | 'amountTotal'
+    | 'amountReceivable'
     | 'originalAmount'
     | 'dueDate'
+    | 'expectedPaymentDate'
     | 'invoiceDate'
     | 'invoiceNumber'
     | 'customerNumber'
     | 'iban'
     | 'bic'
     | 'paymentReference'
+    | 'paymentRecipient'
     | 'documentLanguage'
     | 'urgencyLevel'
     | 'expenseCategory'
@@ -68,6 +77,8 @@ type BackendOcrResponse = Partial<
     | 'paymentMethod'
     | 'taxRelevant'
     | 'reimbursable'
+    | 'cashflowType'
+    | 'receivedDate'
   >
 > & {
   ocrProvider?: 'openai' | 'mock';
@@ -79,10 +90,13 @@ const mockExamples: MockOcrExample[] = [
     paymentStatus: 'needs_review',
     senderName: 'Stadtwerke Berlin',
     creditorName: 'Stadtwerke Berlin',
+    payerName: '',
     branchCategory: 'Energie',
     amountTotal: '132,40 EUR',
+    amountReceivable: '',
     originalAmount: '132,40 EUR',
     dueInDays: 9,
+    expectedPaymentInDays: 0,
     invoiceAgeDays: 5,
     invoiceNumber: 'SWB-2026-4819',
     customerNumber: 'KND-904218',
@@ -93,16 +107,20 @@ const mockExamples: MockOcrExample[] = [
     expenseCategory: 'energy',
     taxRelevant: false,
     reimbursable: false,
+    cashflowType: 'payable',
   },
   {
     documentType: 'telecom_bill',
     paymentStatus: 'unpaid',
     senderName: 'ConnectTel GmbH',
     creditorName: 'ConnectTel GmbH',
+    payerName: '',
     branchCategory: 'Telekom',
     amountTotal: '49,95 EUR',
+    amountReceivable: '',
     originalAmount: '49,95 EUR',
     dueInDays: 6,
+    expectedPaymentInDays: 0,
     invoiceAgeDays: 8,
     invoiceNumber: 'CT-2026-77314',
     customerNumber: 'CON-118204',
@@ -113,16 +131,20 @@ const mockExamples: MockOcrExample[] = [
     expenseCategory: 'telecom',
     taxRelevant: false,
     reimbursable: false,
+    cashflowType: 'payable',
   },
   {
     documentType: 'rent_letter',
     paymentStatus: 'needs_review',
     senderName: 'Hausverwaltung Mitte',
     creditorName: 'Hausverwaltung Mitte',
+    payerName: '',
     branchCategory: 'Miete',
     amountTotal: '18,70 EUR',
+    amountReceivable: '',
     originalAmount: '18,70 EUR',
     dueInDays: 14,
+    expectedPaymentInDays: 0,
     invoiceAgeDays: 3,
     invoiceNumber: 'NK-2026-0442',
     customerNumber: 'MV-30291',
@@ -133,16 +155,20 @@ const mockExamples: MockOcrExample[] = [
     expenseCategory: 'housing',
     taxRelevant: false,
     reimbursable: false,
+    cashflowType: 'payable',
   },
   {
     documentType: 'insurance_document',
     paymentStatus: 'sent_to_insurance',
     senderName: 'SchutzPlus Versicherung',
     creditorName: 'SchutzPlus Versicherung',
+    payerName: '',
     branchCategory: 'Versicherung',
     amountTotal: '86,30 EUR',
+    amountReceivable: '',
     originalAmount: '86,30 EUR',
     dueInDays: 12,
+    expectedPaymentInDays: 0,
     invoiceAgeDays: 4,
     invoiceNumber: 'SPV-2026-6190',
     customerNumber: 'POL-775201',
@@ -153,16 +179,20 @@ const mockExamples: MockOcrExample[] = [
     expenseCategory: 'insurance',
     taxRelevant: false,
     reimbursable: true,
+    cashflowType: 'payable',
   },
   {
     documentType: 'inkasso_letter',
     paymentStatus: 'needs_review',
     senderName: 'FairCollect Inkasso',
     creditorName: 'FairCollect Inkasso',
+    payerName: '',
     branchCategory: 'Inkasso',
     amountTotal: '164,85 EUR',
+    amountReceivable: '',
     originalAmount: '119,90 EUR',
     dueInDays: 5,
+    expectedPaymentInDays: 0,
     invoiceAgeDays: 21,
     invoiceNumber: 'FC-2026-8821',
     customerNumber: 'AZ-440193',
@@ -173,6 +203,31 @@ const mockExamples: MockOcrExample[] = [
     expenseCategory: 'legal',
     taxRelevant: false,
     reimbursable: false,
+    cashflowType: 'payable',
+  },
+  {
+    documentType: 'tax_letter',
+    paymentStatus: 'expected',
+    senderName: 'Finanzamt Berlin',
+    creditorName: '',
+    payerName: 'Finanzamt Berlin',
+    branchCategory: 'Behörde',
+    amountTotal: '',
+    amountReceivable: '248,10 EUR',
+    originalAmount: '',
+    dueInDays: 0,
+    expectedPaymentInDays: 10,
+    invoiceAgeDays: 2,
+    invoiceNumber: 'EST-2026-5521',
+    customerNumber: 'StNr. 12/345/67890',
+    iban: '',
+    bic: '',
+    paymentReference: 'Steuererstattung 2026',
+    urgencyLevel: 'low',
+    expenseCategory: 'tax_government',
+    taxRelevant: true,
+    reimbursable: false,
+    cashflowType: 'receivable',
   },
 ];
 
@@ -183,6 +238,9 @@ const isDocumentType = (value: unknown): value is ScannedDocument['documentType'
 
 const isPaymentStatus = (value: unknown): value is ScannedDocument['paymentStatus'] =>
   typeof value === 'string' && paymentStatusValues.includes(value as ScannedDocument['paymentStatus']);
+
+const isCashflowType = (value: unknown): value is ScannedDocument['cashflowType'] =>
+  typeof value === 'string' && cashflowTypeValues.includes(value as ScannedDocument['cashflowType']);
 
 const isUrgencyLevel = (value: unknown): value is ScannedDocument['urgencyLevel'] =>
   typeof value === 'string' && urgencyLevelValues.includes(value as ScannedDocument['urgencyLevel']);
@@ -218,10 +276,13 @@ export const mockOcrDocument = async (imageUri: string): Promise<ScannedDocument
     paymentStatus: example.paymentStatus,
     senderName: example.senderName,
     creditorName: example.creditorName,
+    payerName: example.payerName,
     branchCategory: example.branchCategory,
     amountTotal: example.amountTotal,
+    amountReceivable: example.amountReceivable,
     originalAmount: example.originalAmount,
     dueDate: addDays(example.dueInDays),
+    expectedPaymentDate: example.expectedPaymentInDays ? addDays(example.expectedPaymentInDays) : '',
     invoiceDate: addDays(-example.invoiceAgeDays),
     invoiceNumber: example.invoiceNumber,
     customerNumber: example.customerNumber,
@@ -233,11 +294,13 @@ export const mockOcrDocument = async (imageUri: string): Promise<ScannedDocument
     paymentNote: '',
     inkassoChecklist: createEmptyInkassoChecklist(),
     expenseCategory: example.expenseCategory,
-    isExpense: true,
+    isExpense: example.cashflowType === 'payable',
     paidDate: '',
+    receivedDate: '',
     paymentMethod: 'unknown',
     taxRelevant: example.taxRelevant,
     reimbursable: example.reimbursable,
+    cashflowType: example.cashflowType,
     ocrSource: 'mock',
   };
 };
@@ -254,16 +317,20 @@ const mapBackendResponseToDocument = (imageUri: string, response: BackendOcrResp
     paymentStatus: isPaymentStatus(response.paymentStatus) ? response.paymentStatus : 'needs_review',
     senderName: stringOrEmpty(response.senderName),
     creditorName: stringOrEmpty(response.creditorName),
+    payerName: stringOrEmpty(response.payerName),
     branchCategory: stringOrEmpty(response.branchCategory),
     amountTotal: stringOrEmpty(response.amountTotal),
+    amountReceivable: stringOrEmpty(response.amountReceivable),
     originalAmount: stringOrEmpty(response.originalAmount),
     dueDate: stringOrEmpty(response.dueDate),
+    expectedPaymentDate: stringOrEmpty(response.expectedPaymentDate),
     invoiceDate: stringOrEmpty(response.invoiceDate),
     invoiceNumber: stringOrEmpty(response.invoiceNumber),
     customerNumber: stringOrEmpty(response.customerNumber),
     iban: stringOrEmpty(response.iban),
     bic: stringOrEmpty(response.bic),
     paymentReference: stringOrEmpty(response.paymentReference),
+    paymentRecipient: stringOrEmpty(response.paymentRecipient),
     documentLanguage: stringOrEmpty(response.documentLanguage) || 'de',
     urgencyLevel: isUrgencyLevel(response.urgencyLevel) ? response.urgencyLevel : 'medium',
     paymentNote: '',
@@ -272,9 +339,11 @@ const mapBackendResponseToDocument = (imageUri: string, response: BackendOcrResp
     expenseCategory: isExpenseCategory(response.expenseCategory) ? response.expenseCategory : 'other',
     isExpense: response.isExpense ?? true,
     paidDate: stringOrEmpty(response.paidDate),
+    receivedDate: stringOrEmpty(response.receivedDate),
     paymentMethod: isPaymentMethod(response.paymentMethod) ? response.paymentMethod : 'unknown',
     taxRelevant: booleanOrFalse(response.taxRelevant),
     reimbursable: booleanOrFalse(response.reimbursable),
+    cashflowType: isCashflowType(response.cashflowType) ? response.cashflowType : 'payable',
     ocrSource: 'backend',
   };
 };

@@ -75,8 +75,8 @@ const getNotifications = (): NotificationsModule | null => {
   }
 };
 
-export const shouldHaveDueDateReminders = (document: Pick<ScannedDocument, 'dueDate' | 'paymentStatus'>) =>
-  Boolean(document.dueDate) && reminderEligibleStatuses.has(document.paymentStatus);
+export const shouldHaveDueDateReminders = (document: Pick<ScannedDocument, 'dueDate' | 'paymentStatus' | 'cashflowType'>) =>
+  document.cashflowType === 'payable' && Boolean(document.dueDate) && reminderEligibleStatuses.has(document.paymentStatus);
 
 const parseDueDate = (dueDate: string) => {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dueDate.trim());
@@ -174,7 +174,7 @@ export const getReminderStatus = async (documentId: string): Promise<DueDateRemi
       }
 
       notificationIds[reminderKey] = notification.identifier;
-      const triggerValue = 'value' in notification.trigger ? notification.trigger.value : undefined;
+      const triggerValue = notification.trigger && 'value' in notification.trigger ? notification.trigger.value : undefined;
       if (typeof triggerValue === 'number') {
         scheduledFor[reminderKey] = new Date(triggerValue).toISOString();
       }

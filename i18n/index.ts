@@ -7,7 +7,7 @@ export const translations = {
 } as const;
 
 export type Language = keyof typeof translations;
-export type Translation = typeof de;
+export type Translation = (typeof translations)[Language];
 
 export const defaultLanguage: Language = 'de';
 
