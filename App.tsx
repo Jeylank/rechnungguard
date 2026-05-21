@@ -162,14 +162,26 @@ const isUrgent = (document: ScannedDocument) => {
 };
 
 const getDocumentTypeLabel = (t: Translation, value: DocumentType) => t.documentTypes[value] ?? value;
-const getPaymentStatusLabel = (t: Translation, value: ScannedDocument['paymentStatus']) =>
-  t.paymentStatuses[value] ?? value;
+const paymentStatusAliases: Record<string, ScannedDocument['paymentStatus']> = {
+  open: 'unpaid',
+};
+
+const getPaymentStatusLabel = (t: Translation, value: ScannedDocument['paymentStatus'] | string) => {
+  const status = paymentStatusAliases[value.toLowerCase()] ?? value;
+  return t.paymentStatuses[status as ScannedDocument['paymentStatus']] ?? value;
+};
 const getUrgencyLevelLabel = (t: Translation, value: ScannedDocument['urgencyLevel']) =>
   t.urgencyLevels[value] ?? value;
 const getCashflowTypeLabel = (t: Translation, value: ScannedDocument['cashflowType']) =>
   t.cashflowTypes[value] ?? value;
-const getExpenseCategoryLabel = (t: Translation, value: ScannedDocument['expenseCategory']) =>
-  t.expenseCategories[value] ?? value;
+const expenseCategoryAliases: Record<string, ScannedDocument['expenseCategory']> = {
+  rent: 'rent',
+};
+
+const getExpenseCategoryLabel = (t: Translation, value: ScannedDocument['expenseCategory'] | string) => {
+  const category = expenseCategoryAliases[value.toLowerCase()] ?? value;
+  return t.expenseCategories[category as ScannedDocument['expenseCategory']] ?? value;
+};
 const getPaymentMethodLabel = (t: Translation, value: ScannedDocument['paymentMethod']) =>
   t.paymentMethods[value] ?? value;
 const getBooleanLabel = (t: Translation, value: boolean) => (value ? t.yes : t.no);
@@ -229,6 +241,11 @@ const normalizeQrText = (value: string, maxLength: number) =>
   value.replace(/[\r\n]+/g, ' ').trim().slice(0, maxLength);
 
 const normalizeIbanForQr = (value: string) => value.replace(/\s+/g, '').toUpperCase();
+
+const formatIbanForDisplay = (value: string) =>
+  normalizeIbanForQr(value)
+    .replace(/(.{4})/g, '$1 ')
+    .trim();
 
 const formatEpcAmount = (value: string) => {
   const amount = parseAmount(value);
@@ -312,6 +329,9 @@ const getDetailValue = (t: Translation, document: ScannedDocument, field: Editab
   if (field === 'cashflowType') {
     return getCashflowTypeLabel(t, document.cashflowType);
   }
+  if (field === 'iban') {
+    return formatIbanForDisplay(document.iban);
+  }
   return String(document[field] ?? '') || '-';
 };
 
@@ -329,6 +349,13 @@ const formatEuro = (value: number) =>
     style: 'currency',
     currency: 'EUR',
   }).format(value);
+
+const formatCardAmount = (value: string) =>
+  value
+    .replace(/\bEuro\b/gi, '€')
+    .replace(/\bEUR\b/g, '€')
+    .replace(/\s+/g, ' ')
+    .trim();
 
 const isThisMonth = (value: string) => {
   if (!value) {
@@ -813,6 +840,8 @@ function HomeScreen({
   onScan: () => void;
   onOpenDocument: (document: ScannedDocument) => void;
 }) {
+  const hasDocuments = recentDocuments.length > 0;
+
   return (
     <ScrollView contentContainerStyle={styles.scrollContent}>
       <View style={styles.header}>
@@ -854,35 +883,35 @@ function HomeScreen({
         <Text style={styles.primaryButtonText}>{t.scanBillOrLetter}</Text>
       </Pressable>
 
-      <SectionTitle title={t.urgentUnpaidBills} />
-      {urgentDocuments.length === 0 ? (
-        <EmptyState text={t.noUrgentUnpaidBills} />
-      ) : (
-        urgentDocuments.map((document) => (
-          <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} urgent />
-        ))
+      {urgentDocuments.length > 0 ? (
+        <>
+          <SectionTitle title={t.urgentUnpaidBills} />
+          {urgentDocuments.map((document) => (
+            <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} urgent />
+          ))}
+        </>
       )}
 
-      <SectionTitle title={t.debtWarnings} />
-      {debtWarningDocuments.length === 0 ? (
-        <EmptyState text={t.noDebtWarnings} />
-      ) : (
-        debtWarningDocuments.map((document) => (
-          <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} urgent />
-        ))
+      {debtWarningDocuments.length > 0 ? (
+        <>
+          <SectionTitle title={t.debtWarnings} />
+          {debtWarningDocuments.map((document) => (
+            <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} urgent />
+          ))}
+        </>
       )}
 
-      <SectionTitle title={t.expectedReimbursements} />
-      {expectedReimbursementDocuments.length === 0 ? (
-        <EmptyState text={t.noExpectedReimbursements} />
-      ) : (
-        expectedReimbursementDocuments.map((document) => (
-          <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} />
-        ))
+      {expectedReimbursementDocuments.length > 0 ? (
+        <>
+          <SectionTitle title={t.expectedReimbursements} />
+          {expectedReimbursementDocuments.map((document) => (
+            <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} />
+          ))}
+        </>
       )}
 
-      <SectionTitle title={t.recentScannedDocuments} />
-      {recentDocuments.length === 0 ? (
+      {hasDocuments ? <SectionTitle title={t.recentScannedDocuments} /> : null}
+      {!hasDocuments ? (
         <EmptyState text={t.scannedDocumentsEmpty} />
       ) : (
         recentDocuments.map((document) => (
@@ -1152,7 +1181,7 @@ function PaymentPreparationScreen({
 
       <View style={styles.paymentPreparationPanel}>
         <PaymentPreparationRow label={t.paymentTransferLabels.recipient} value={recipient} />
-        <PaymentPreparationRow label={t.paymentTransferLabels.iban} value={document.iban} />
+        <PaymentPreparationRow label={t.paymentTransferLabels.iban} value={formatIbanForDisplay(document.iban)} />
         <PaymentPreparationRow label={t.paymentTransferLabels.amount} value={document.amountTotal} />
         <PaymentPreparationRow label={t.paymentTransferLabels.reference} value={paymentReference} />
         <PaymentPreparationRow label={t.paymentTransferLabels.dueDate} value={document.dueDate} />
@@ -1167,7 +1196,7 @@ function PaymentPreparationScreen({
         <AppButton
           label={t.copyIban}
           disabled={!document.iban}
-          onPress={() => copyValue(document.iban, t.paymentTransferLabels.iban)}
+          onPress={() => copyValue(normalizedIban, t.paymentTransferLabels.iban)}
         />
         <AppButton
           label={t.copyAmount}
@@ -1340,9 +1369,10 @@ function DocumentForm({
           </ScrollView>
         ) : (
           <TextInput
-            value={String(document[field] ?? '')}
-            onChangeText={(value) => updateField(field, value)}
+            value={field === 'iban' ? formatIbanForDisplay(document.iban) : String(document[field] ?? '')}
+            onChangeText={(value) => updateField(field, field === 'iban' ? normalizeIbanForQr(value) : value)}
             placeholder={label}
+            autoCapitalize={field === 'iban' ? 'characters' : undefined}
             style={styles.input}
           />
         )}
@@ -1487,9 +1517,11 @@ function DocumentRow({
   onPress: () => void;
   urgent?: boolean;
 }) {
-  const displayedAmount = document.cashflowType === 'receivable'
-    ? document.amountReceivable || document.amountTotal || '-'
-    : document.amountTotal || '-';
+  const displayedAmount = formatCardAmount(
+    document.cashflowType === 'receivable'
+      ? document.amountReceivable || document.amountTotal || '-'
+      : document.amountTotal || '-',
+  );
   const dateLabel = document.cashflowType === 'receivable' ? t.expectedReimbursement : t.due;
   const dateValue = document.cashflowType === 'receivable'
     ? document.expectedPaymentDate || '-'

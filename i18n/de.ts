@@ -170,6 +170,7 @@ export const de = {
   yes: 'Ja',
   no: 'Nein',
   expenseCategories: {
+    rent: 'Miete',
     housing: 'Wohnen',
     energy: 'Energie',
     telecom: 'Telekommunikation',

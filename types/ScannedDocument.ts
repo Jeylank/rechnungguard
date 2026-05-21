@@ -30,6 +30,7 @@ export type UrgencyLevel = 'low' | 'medium' | 'high' | 'critical';
 export type CashflowType = 'payable' | 'receivable' | 'neutral' | 'unknown';
 
 export type ExpenseCategory =
+  | 'rent'
   | 'housing'
   | 'energy'
   | 'telecom'
@@ -144,6 +145,7 @@ export const urgencyLevelValues: UrgencyLevel[] = ['low', 'medium', 'high', 'cri
 export const cashflowTypeValues: CashflowType[] = ['payable', 'receivable', 'neutral', 'unknown'];
 
 export const expenseCategoryValues: ExpenseCategory[] = [
+  'rent',
   'housing',
   'energy',
   'telecom',

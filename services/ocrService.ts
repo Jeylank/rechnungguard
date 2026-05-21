@@ -295,6 +295,14 @@ const isDocumentType = (value: unknown): value is ScannedDocument['documentType'
 const isPaymentStatus = (value: unknown): value is ScannedDocument['paymentStatus'] =>
   typeof value === 'string' && paymentStatusValues.includes(value as ScannedDocument['paymentStatus']);
 
+const normalizePaymentStatus = (value: unknown): ScannedDocument['paymentStatus'] => {
+  if (typeof value === 'string' && value.toLowerCase() === 'open') {
+    return 'unpaid';
+  }
+
+  return isPaymentStatus(value) ? value : 'needs_review';
+};
+
 const isCashflowType = (value: unknown): value is ScannedDocument['cashflowType'] =>
   typeof value === 'string' && cashflowTypeValues.includes(value as ScannedDocument['cashflowType']);
 
@@ -303,6 +311,14 @@ const isUrgencyLevel = (value: unknown): value is ScannedDocument['urgencyLevel'
 
 const isExpenseCategory = (value: unknown): value is ScannedDocument['expenseCategory'] =>
   typeof value === 'string' && expenseCategoryValues.includes(value as ScannedDocument['expenseCategory']);
+
+const normalizeExpenseCategory = (value: unknown): ScannedDocument['expenseCategory'] => {
+  if (typeof value === 'string' && value.toLowerCase() === 'rent') {
+    return 'rent';
+  }
+
+  return isExpenseCategory(value) ? value : 'other';
+};
 
 const isPaymentMethod = (value: unknown): value is ScannedDocument['paymentMethod'] =>
   value === 'unknown' ||
@@ -315,6 +331,7 @@ const isPaymentMethod = (value: unknown): value is ScannedDocument['paymentMetho
 
 const stringOrEmpty = (value: unknown) => (typeof value === 'string' ? value : '');
 const booleanOrFalse = (value: unknown) => (typeof value === 'boolean' ? value : false);
+const correctPaymentReference = (value: string) => value.replace(/^ertragsnummer\b/i, 'Vertragsnummer');
 
 export const mockOcrDocument = async (imageUri: string): Promise<ScannedDocument> => {
   await new Promise((resolve) => setTimeout(resolve, 900));
@@ -349,7 +366,7 @@ export const mockOcrDocument = async (imageUri: string): Promise<ScannedDocument
     caseNumber: example.caseNumber,
     iban: example.iban,
     bic: example.bic,
-    paymentReference: example.paymentReference,
+    paymentReference: correctPaymentReference(example.paymentReference),
     documentLanguage: 'de',
     urgencyLevel: example.urgencyLevel,
     paymentNote: '',
@@ -377,7 +394,7 @@ const mapBackendResponseToDocument = (imageUri: string, response: BackendOcrResp
     createdAt: now,
     updatedAt: now,
     documentType: isDocumentType(response.documentType) ? response.documentType : 'unknown',
-    paymentStatus: isPaymentStatus(response.paymentStatus) ? response.paymentStatus : 'needs_review',
+    paymentStatus: normalizePaymentStatus(response.paymentStatus),
     senderName: stringOrEmpty(response.senderName),
     creditorName: stringOrEmpty(response.creditorName),
     payerName: stringOrEmpty(response.payerName),
@@ -397,14 +414,14 @@ const mapBackendResponseToDocument = (imageUri: string, response: BackendOcrResp
     caseNumber: stringOrEmpty(response.caseNumber),
     iban: stringOrEmpty(response.iban),
     bic: stringOrEmpty(response.bic),
-    paymentReference: stringOrEmpty(response.paymentReference),
+    paymentReference: correctPaymentReference(stringOrEmpty(response.paymentReference)),
     paymentRecipient: stringOrEmpty(response.paymentRecipient),
     documentLanguage: stringOrEmpty(response.documentLanguage) || 'de',
     urgencyLevel: isUrgencyLevel(response.urgencyLevel) ? response.urgencyLevel : 'medium',
     paymentNote: '',
     inkassoChecklist: createEmptyInkassoChecklist(),
     dueDateReminderStatus: undefined,
-    expenseCategory: isExpenseCategory(response.expenseCategory) ? response.expenseCategory : 'other',
+    expenseCategory: normalizeExpenseCategory(response.expenseCategory),
     isExpense: response.isExpense ?? true,
     paidDate: stringOrEmpty(response.paidDate),
     receivedDate: stringOrEmpty(response.receivedDate),
