@@ -70,6 +70,7 @@ type EditableField =
   | 'documentLanguage'
   | 'urgencyLevel'
   | 'receivedDate';
+type FieldLabelKey = keyof typeof translations.de.fields;
 
 type ExpenseSummary = {
   openAmount: number;
@@ -155,6 +156,7 @@ const getExpenseCategoryLabel = (t: Translation, value: ScannedDocument['expense
 const getPaymentMethodLabel = (t: Translation, value: ScannedDocument['paymentMethod']) =>
   t.paymentMethods[value] ?? value;
 const getBooleanLabel = (t: Translation, value: boolean) => (value ? t.yes : t.no);
+const getFieldLabel = (t: Translation, field: FieldLabelKey) => t.fields[field] || translations.de.fields[field] || field;
 
 const copyToClipboard = (value: string) => Clipboard.setStringAsync(value);
 
@@ -1025,33 +1027,33 @@ function DetailScreen({
       </View>
 
       <View style={styles.detailRow}>
-        <Text style={styles.detailLabel}>{t.fields.isExpense}</Text>
+        <Text style={styles.detailLabel}>{getFieldLabel(t, 'isExpense')}</Text>
         <Text style={styles.detailValue}>{getBooleanLabel(t, document.isExpense)}</Text>
       </View>
       <View style={styles.detailRow}>
-        <Text style={styles.detailLabel}>{t.fields.expenseCategory}</Text>
+        <Text style={styles.detailLabel}>{getFieldLabel(t, 'expenseCategory')}</Text>
         <Text style={styles.detailValue}>{getExpenseCategoryLabel(t, document.expenseCategory)}</Text>
       </View>
       <View style={styles.detailRow}>
-        <Text style={styles.detailLabel}>{t.fields.paidDate}</Text>
+        <Text style={styles.detailLabel}>{getFieldLabel(t, 'paidDate')}</Text>
         <Text style={styles.detailValue}>{document.paidDate || '-'}</Text>
       </View>
       <View style={styles.detailRow}>
-        <Text style={styles.detailLabel}>{t.fields.paymentMethod}</Text>
+        <Text style={styles.detailLabel}>{getFieldLabel(t, 'paymentMethod')}</Text>
         <Text style={styles.detailValue}>{getPaymentMethodLabel(t, document.paymentMethod)}</Text>
       </View>
       <View style={styles.detailRow}>
-        <Text style={styles.detailLabel}>{t.fields.taxRelevant}</Text>
+        <Text style={styles.detailLabel}>{getFieldLabel(t, 'taxRelevant')}</Text>
         <Text style={styles.detailValue}>{getBooleanLabel(t, document.taxRelevant)}</Text>
       </View>
       <View style={styles.detailRow}>
-        <Text style={styles.detailLabel}>{t.fields.reimbursable}</Text>
+        <Text style={styles.detailLabel}>{getFieldLabel(t, 'reimbursable')}</Text>
         <Text style={styles.detailValue}>{getBooleanLabel(t, document.reimbursable)}</Text>
       </View>
 
       {fieldOrder.map((field) => (
         <View key={field} style={styles.detailRow}>
-          <Text style={styles.detailLabel}>{t.fields[field]}</Text>
+          <Text style={styles.detailLabel}>{getFieldLabel(t, field)}</Text>
           <Text style={styles.detailValue}>{getDetailValue(t, document, field)}</Text>
         </View>
       ))}
@@ -1277,7 +1279,7 @@ function DocumentForm({
                 : field === 'urgencyLevel'
                   ? urgencyLevelValues
                   : null;
-        const label = t.fields[field];
+        const label = getFieldLabel(t, field);
 
         return (
           <View key={field} style={styles.inputGroup}>
@@ -1396,7 +1398,7 @@ function ExpenseReviewFields({
     <View>
       <Text style={styles.sectionTitle}>{t.expenseSummary}</Text>
       <View style={styles.inputGroup}>
-        <Text style={styles.inputLabel}>{t.fields.expenseCategory}</Text>
+        <Text style={styles.inputLabel}>{getFieldLabel(t, 'expenseCategory')}</Text>
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -1423,7 +1425,7 @@ function ExpenseReviewFields({
           onPress={() => toggleField('taxRelevant')}
         >
           <Text style={[styles.pillText, document.taxRelevant && styles.pillTextSelected]}>
-            {t.fields.taxRelevant}: {getBooleanLabel(t, document.taxRelevant)}
+            {getFieldLabel(t, 'taxRelevant')}: {getBooleanLabel(t, document.taxRelevant)}
           </Text>
         </Pressable>
         <Pressable
@@ -1431,7 +1433,7 @@ function ExpenseReviewFields({
           onPress={() => toggleField('reimbursable')}
         >
           <Text style={[styles.pillText, document.reimbursable && styles.pillTextSelected]}>
-            {t.fields.reimbursable}: {getBooleanLabel(t, document.reimbursable)}
+            {getFieldLabel(t, 'reimbursable')}: {getBooleanLabel(t, document.reimbursable)}
           </Text>
         </Pressable>
       </View>
