@@ -890,7 +890,7 @@ function HomeScreen({
             <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} urgent />
           ))}
         </>
-      )}
+      ) : null}
 
       {debtWarningDocuments.length > 0 ? (
         <>
@@ -899,7 +899,7 @@ function HomeScreen({
             <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} urgent />
           ))}
         </>
-      )}
+      ) : null}
 
       {expectedReimbursementDocuments.length > 0 ? (
         <>
@@ -908,7 +908,7 @@ function HomeScreen({
             <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} />
           ))}
         </>
-      )}
+      ) : null}
 
       {hasDocuments ? <SectionTitle title={t.recentScannedDocuments} /> : null}
       {!hasDocuments ? (
