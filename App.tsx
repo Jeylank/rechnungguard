@@ -94,36 +94,53 @@ const LANGUAGE_STORAGE_KEY = 'rechnungguard.language.v1';
 const PRIVACY_NOTICE_ACCEPTED_STORAGE_KEY = 'rechnungguard.privacyNoticeAccepted.v1';
 const STORE_DOCUMENT_IMAGES_STORAGE_KEY = 'rechnungguard.storeDocumentImages.v1';
 
-const fieldOrder: EditableField[] = [
+const primaryReviewFields: EditableField[] = [
   'documentType',
   'paymentStatus',
   'cashflowType',
   'senderName',
   'creditorName',
+  'amountTotal',
+  'dueDate',
+  'iban',
+  'paymentReference',
+];
+
+const advancedReviewFields: EditableField[] = [
   'payerName',
   'branchCategory',
-  'amountTotal',
   'amountReceivable',
-  'originalAmount',
-  'reminderFee',
-  'collectionFee',
-  'dueDate',
   'expectedPaymentDate',
   'invoiceDate',
   'invoiceNumber',
   'customerNumber',
+  'originalAmount',
+  'reminderFee',
+  'collectionFee',
   'reminderLevel',
   'originalCreditorName',
   'caseNumber',
-  'iban',
   'bic',
-  'paymentReference',
   'riskNote',
   'actionRecommendation',
   'documentLanguage',
   'urgencyLevel',
-  'receivedDate',
 ];
+
+const fieldOrder: EditableField[] = [...primaryReviewFields, ...advancedReviewFields, 'receivedDate'];
+
+const receivableOnlyFields = new Set<EditableField>(['amountReceivable', 'payerName', 'expectedPaymentDate']);
+const reminderOrInkassoFields = new Set<EditableField>([
+  'originalAmount',
+  'reminderFee',
+  'collectionFee',
+  'reminderLevel',
+  'originalCreditorName',
+  'caseNumber',
+  'riskNote',
+  'actionRecommendation',
+]);
+const paymentPreparationFields = new Set<EditableField>(['iban', 'bic', 'paymentReference']);
 
 const sortByDateDesc = (a: ScannedDocument, b: ScannedDocument) =>
   new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
@@ -162,6 +179,36 @@ const copyToClipboard = (value: string) => Clipboard.setStringAsync(value);
 
 const isReminderOrInkassoDocument = (document: ScannedDocument) =>
   document.documentType === 'payment_reminder' || document.documentType === 'inkasso_letter';
+
+const isOpenDebtWarningDocument = (document: ScannedDocument) =>
+  isReminderOrInkassoDocument(document) && document.paymentStatus !== 'closed' && document.paymentStatus !== 'paid';
+
+const isExpectedReimbursementDocument = (document: ScannedDocument) =>
+  document.cashflowType === 'receivable' && receivableOpenStatuses.has(document.paymentStatus);
+
+const hasEditableFieldValue = (document: ScannedDocument, field: EditableField) => {
+  const value = document[field];
+  return typeof value === 'string' ? value.trim().length > 0 : Boolean(value);
+};
+
+const shouldShowEditableField = (document: ScannedDocument, field: EditableField) => {
+  if (receivableOnlyFields.has(field)) {
+    return document.cashflowType === 'receivable';
+  }
+
+  if (paymentPreparationFields.has(field)) {
+    return document.cashflowType !== 'receivable' && document.cashflowType !== 'neutral';
+  }
+
+  if (reminderOrInkassoFields.has(field)) {
+    return isReminderOrInkassoDocument(document) || hasEditableFieldValue(document, field);
+  }
+
+  return true;
+};
+
+const getVisibleFields = (document: ScannedDocument, fields: EditableField[]) =>
+  fields.filter((field) => shouldShowEditableField(document, field));
 
 const mentionsMahnbescheid = (document: ScannedDocument) =>
   [
@@ -457,7 +504,14 @@ export default function App() {
   }), [documents]);
 
   const recentDocuments = useMemo(() => documents.slice().sort(sortByDateDesc).slice(0, 8), [documents]);
-  const expenseSummary = useMemo(() => getExpenseSummary(documents), [documents]);
+  const debtWarningDocuments = useMemo(
+    () => documents.filter(isOpenDebtWarningDocument).sort(sortByDateDesc).slice(0, 5),
+    [documents],
+  );
+  const expectedReimbursementDocuments = useMemo(
+    () => documents.filter(isExpectedReimbursementDocument).sort(sortByDateDesc).slice(0, 5),
+    [documents],
+  );
 
   useEffect(() => {
     if (screen !== 'scan' || OCR_MODE !== 'backend') {
@@ -667,14 +721,12 @@ export default function App() {
         {screen === 'home' ? (
           <HomeScreen
             urgentDocuments={urgentDocuments}
+            debtWarningDocuments={debtWarningDocuments}
+            expectedReimbursementDocuments={expectedReimbursementDocuments}
             recentDocuments={recentDocuments}
-            expenseSummary={expenseSummary}
             language={language}
-            storeDocumentImages={storeDocumentImages}
             t={t}
             onChangeLanguage={changeLanguage}
-            onChangeStoreDocumentImages={changeStoreDocumentImages}
-            onDeleteAllLocalData={deleteAllLocalData}
             onScan={() => {
               setSelectedImageUri(null);
               setDraft(null);
@@ -742,26 +794,22 @@ export default function App() {
 
 function HomeScreen({
   urgentDocuments,
+  debtWarningDocuments,
+  expectedReimbursementDocuments,
   recentDocuments,
-  expenseSummary,
   language,
-  storeDocumentImages,
   t,
   onChangeLanguage,
-  onChangeStoreDocumentImages,
-  onDeleteAllLocalData,
   onScan,
   onOpenDocument,
 }: {
   urgentDocuments: ScannedDocument[];
+  debtWarningDocuments: ScannedDocument[];
+  expectedReimbursementDocuments: ScannedDocument[];
   recentDocuments: ScannedDocument[];
-  expenseSummary: ExpenseSummary;
   language: Language;
-  storeDocumentImages: boolean;
   t: Translation;
   onChangeLanguage: (language: Language) => void;
-  onChangeStoreDocumentImages: (enabled: boolean) => void;
-  onDeleteAllLocalData: () => void;
   onScan: () => void;
   onOpenDocument: (document: ScannedDocument) => void;
 }) {
@@ -802,34 +850,9 @@ function HomeScreen({
         </View>
       </View>
 
-      <View style={styles.privacySettings}>
-        <View style={styles.settingRow}>
-          <View style={styles.settingTextBlock}>
-            <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.86} style={styles.inputLabel}>
-              {t.storeDocumentImages}
-            </Text>
-            <Text style={styles.settingHint}>{t.storeDocumentImagesHint}</Text>
-          </View>
-          <Pressable
-            accessibilityRole="switch"
-            accessibilityState={{ checked: storeDocumentImages }}
-            style={[styles.settingToggleButton, storeDocumentImages && styles.settingToggleButtonEnabled]}
-            onPress={() => onChangeStoreDocumentImages(!storeDocumentImages)}
-          >
-            <Text style={[styles.settingToggleButtonText, storeDocumentImages && styles.settingToggleButtonTextEnabled]}>
-              {storeDocumentImages ? t.on : t.off}
-            </Text>
-          </Pressable>
-        </View>
-      </View>
-
       <Pressable style={styles.primaryButton} onPress={onScan}>
         <Text style={styles.primaryButtonText}>{t.scanBillOrLetter}</Text>
       </Pressable>
-
-      <AppButton label={t.deleteAllLocalData} disabled={false} onPress={onDeleteAllLocalData} />
-
-      <ExpenseSummarySection summary={expenseSummary} t={t} />
 
       <SectionTitle title={t.urgentUnpaidBills} />
       {urgentDocuments.length === 0 ? (
@@ -837,6 +860,24 @@ function HomeScreen({
       ) : (
         urgentDocuments.map((document) => (
           <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} urgent />
+        ))
+      )}
+
+      <SectionTitle title={t.debtWarnings} />
+      {debtWarningDocuments.length === 0 ? (
+        <EmptyState text={t.noDebtWarnings} />
+      ) : (
+        debtWarningDocuments.map((document) => (
+          <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} urgent />
+        ))
+      )}
+
+      <SectionTitle title={t.expectedReimbursements} />
+      {expectedReimbursementDocuments.length === 0 ? (
+        <EmptyState text={t.noExpectedReimbursements} />
+      ) : (
+        expectedReimbursementDocuments.map((document) => (
+          <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} />
         ))
       )}
 
@@ -923,7 +964,6 @@ function ReviewScreen({
       <Text style={styles.screenTitle}>{t.reviewScan}</Text>
       <ImagePreview imageUri={draft.imageUri} t={t} />
       <DocumentForm document={draft} t={t} onChange={onChange} />
-      <ExpenseReviewFields document={draft} t={t} onChange={onChange} />
       <Pressable style={styles.primaryButton} onPress={onSave}>
         <Text style={styles.primaryButtonText}>{t.save}</Text>
       </Pressable>
@@ -1042,7 +1082,7 @@ function DetailScreen({
         <Text style={styles.detailValue}>{getBooleanLabel(t, document.reimbursable)}</Text>
       </View>
 
-      {fieldOrder.map((field) => (
+      {getVisibleFields(document, fieldOrder).map((field) => (
         <View key={field} style={styles.detailRow}>
           <Text style={styles.detailLabel}>{getFieldLabel(t, field)}</Text>
           <Text style={styles.detailValue}>{getDetailValue(t, document, field)}</Text>
@@ -1257,60 +1297,72 @@ function DocumentForm({
     onChange({ ...document, [field]: value });
   };
 
+  const renderField = (field: EditableField) => {
+    const options =
+      field === 'documentType'
+        ? documentTypeValues
+        : field === 'paymentStatus'
+          ? paymentStatusValues
+          : field === 'cashflowType'
+            ? cashflowTypeValues
+            : field === 'urgencyLevel'
+              ? urgencyLevelValues
+              : null;
+    const label = getFieldLabel(t, field);
+
+    return (
+      <View key={field} style={styles.inputGroup}>
+        <Text style={styles.inputLabel}>{label}</Text>
+        {options ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.pillScroller}
+            contentContainerStyle={styles.pillRow}
+          >
+            {options.map((option) => (
+              <Pressable
+                key={option}
+                style={[styles.pill, document[field] === option && styles.pillSelected]}
+                onPress={() => updateField(field, option)}
+              >
+                <Text style={[styles.pillText, document[field] === option && styles.pillTextSelected]}>
+                  {field === 'documentType'
+                    ? getDocumentTypeLabel(t, option as DocumentType)
+                    : field === 'paymentStatus'
+                      ? getPaymentStatusLabel(t, option as ScannedDocument['paymentStatus'])
+                      : field === 'cashflowType'
+                        ? getCashflowTypeLabel(t, option as ScannedDocument['cashflowType'])
+                        : getUrgencyLevelLabel(t, option as ScannedDocument['urgencyLevel'])}
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        ) : (
+          <TextInput
+            value={String(document[field] ?? '')}
+            onChangeText={(value) => updateField(field, value)}
+            placeholder={label}
+            style={styles.input}
+          />
+        )}
+      </View>
+    );
+  };
+
+  const primaryFields = getVisibleFields(document, primaryReviewFields);
+  const advancedFields = getVisibleFields(document, advancedReviewFields);
+
   return (
     <View>
-      {fieldOrder.map((field) => {
-        const options =
-          field === 'documentType'
-            ? documentTypeValues
-            : field === 'paymentStatus'
-              ? paymentStatusValues
-              : field === 'cashflowType'
-                ? cashflowTypeValues
-                : field === 'urgencyLevel'
-                  ? urgencyLevelValues
-                  : null;
-        const label = getFieldLabel(t, field);
-
-        return (
-          <View key={field} style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>{label}</Text>
-            {options ? (
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                style={styles.pillScroller}
-                contentContainerStyle={styles.pillRow}
-              >
-                {options.map((option) => (
-                  <Pressable
-                    key={option}
-                    style={[styles.pill, document[field] === option && styles.pillSelected]}
-                    onPress={() => updateField(field, option)}
-                  >
-                    <Text style={[styles.pillText, document[field] === option && styles.pillTextSelected]}>
-                      {field === 'documentType'
-                        ? getDocumentTypeLabel(t, option as DocumentType)
-                        : field === 'paymentStatus'
-                          ? getPaymentStatusLabel(t, option as ScannedDocument['paymentStatus'])
-                          : field === 'cashflowType'
-                            ? getCashflowTypeLabel(t, option as ScannedDocument['cashflowType'])
-                            : getUrgencyLevelLabel(t, option as ScannedDocument['urgencyLevel'])}
-                    </Text>
-                  </Pressable>
-                ))}
-              </ScrollView>
-            ) : (
-              <TextInput
-                value={String(document[field] ?? '')}
-                onChangeText={(value) => updateField(field, value)}
-                placeholder={label}
-                style={styles.input}
-              />
-            )}
-          </View>
-        );
-      })}
+      {primaryFields.map(renderField)}
+      {advancedFields.length > 0 ? (
+        <View style={styles.formSection}>
+          <Text style={styles.sectionTitle}>{t.moreDetails}</Text>
+          {advancedFields.map(renderField)}
+        </View>
+      ) : null}
+      <ExpenseReviewFields document={document} t={t} onChange={onChange} />
     </View>
   );
 }
@@ -1378,8 +1430,8 @@ function ExpenseReviewFields({
   };
 
   return (
-    <View>
-      <Text style={styles.sectionTitle}>{t.expenseSummary}</Text>
+    <View style={styles.formSection}>
+      <Text style={styles.sectionTitle}>{t.categorization}</Text>
       <View style={styles.inputGroup}>
         <Text style={styles.inputLabel}>{getFieldLabel(t, 'expenseCategory')}</Text>
         <ScrollView
@@ -1866,6 +1918,9 @@ const styles = StyleSheet.create({
   },
   inputGroup: {
     marginBottom: 14,
+  },
+  formSection: {
+    marginTop: 4,
   },
   inputLabel: {
     color: '#153433',
