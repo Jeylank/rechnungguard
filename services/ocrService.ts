@@ -60,6 +60,7 @@ type BackendOcrResponse = Partial<
     ScannedDocument,
     | 'documentType'
     | 'paymentStatus'
+    | 'supplierName'
     | 'senderName'
     | 'creditorName'
     | 'payerName'
@@ -347,6 +348,7 @@ export const mockOcrDocument = async (imageUri: string): Promise<ScannedDocument
     updatedAt: now,
     documentType: example.documentType,
     paymentStatus: example.paymentStatus,
+    supplierName: example.creditorName || example.senderName,
     senderName: example.senderName,
     creditorName: example.creditorName,
     payerName: example.payerName,
@@ -395,6 +397,7 @@ const mapBackendResponseToDocument = (imageUri: string, response: BackendOcrResp
     updatedAt: now,
     documentType: isDocumentType(response.documentType) ? response.documentType : 'unknown',
     paymentStatus: normalizePaymentStatus(response.paymentStatus),
+    supplierName: stringOrEmpty(response.supplierName),
     senderName: stringOrEmpty(response.senderName),
     creditorName: stringOrEmpty(response.creditorName),
     payerName: stringOrEmpty(response.payerName),

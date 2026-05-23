@@ -7,6 +7,7 @@ const STORAGE_KEY = 'rechnungguard.documents.v1';
 const withDocumentDefaults = (document: ScannedDocument): ScannedDocument => ({
   ...document,
   cashflowType: document.cashflowType ?? (document.isExpense === false ? 'neutral' : 'payable'),
+  supplierName: document.supplierName ?? '',
   amountReceivable: document.amountReceivable ?? '',
   originalAmount: document.originalAmount ?? '',
   reminderFee: document.reminderFee ?? '',

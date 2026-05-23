@@ -80,6 +80,7 @@ export type ScannedDocument = {
   updatedAt: string;
   documentType: DocumentType;
   paymentStatus: PaymentStatus;
+  supplierName?: string;
   senderName: string;
   creditorName: string;
   payerName: string;

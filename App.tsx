@@ -89,8 +89,25 @@ type ExpenseCategorySummary = {
   paidOrReceivedThisMonth: number;
 };
 
+type SupplierSummary = {
+  supplierName: string;
+  openInvoiceCount: number;
+  totalOpenAmount: number;
+  nextDueDate: string;
+};
+
+type BusinessPayablesDashboard = {
+  overdue: ScannedDocument[];
+  dueToday: ScannedDocument[];
+  dueThisWeek: ScannedDocument[];
+  openSupplierInvoices: ScannedDocument[];
+  paidThisMonth: ScannedDocument[];
+  supplierSummaries: SupplierSummary[];
+};
+
 const unpaidStatuses = new Set(['needs_review', 'unpaid', 'sent_to_insurance', 'waiting_reimbursement']);
 const openExpenseStatuses = new Set<ScannedDocument['paymentStatus']>(['needs_review', 'unpaid']);
+const openSupplierPayableStatuses = new Set<ScannedDocument['paymentStatus']>(['needs_review', 'unpaid', 'disputed']);
 const receivableOpenStatuses = new Set<ScannedDocument['paymentStatus']>(['needs_review', 'expected', 'waiting_reimbursement']);
 const blockedPaymentPreparationStatuses = new Set<ScannedDocument['paymentStatus']>(['paid', 'closed']);
 const LANGUAGE_STORAGE_KEY = 'rechnungguard.language.v1';
@@ -215,6 +232,12 @@ const isOpenDebtWarningDocument = (document: ScannedDocument) =>
 
 const isExpectedReimbursementDocument = (document: ScannedDocument) =>
   document.cashflowType === 'receivable' && receivableOpenStatuses.has(document.paymentStatus);
+
+const getSupplierName = (document: ScannedDocument, fallback: string) =>
+  document.supplierName?.trim() || document.creditorName.trim() || document.senderName.trim() || fallback;
+
+const getDocumentTitle = (document: ScannedDocument, appMode: AppMode, t: Translation) =>
+  appMode === 'business' ? getSupplierName(document, t.unknownSupplier) : document.senderName || document.creditorName || t.unknownSender;
 
 const hasEditableFieldValue = (document: ScannedDocument, field: EditableField) => {
   const value = document[field];
@@ -469,6 +492,67 @@ const getExpenseSummary = (documents: ScannedDocument[], appMode: AppMode): Expe
 
 const todayIsoDate = () => new Date().toISOString().slice(0, 10);
 
+const addDaysToIsoDate = (isoDate: string, days: number) => {
+  const date = new Date(`${isoDate}T00:00:00`);
+  date.setDate(date.getDate() + days);
+  return date.toISOString().slice(0, 10);
+};
+
+const sortByDueDateAsc = (a: ScannedDocument, b: ScannedDocument) => {
+  const aDue = a.dueDate || '9999-12-31';
+  const bDue = b.dueDate || '9999-12-31';
+  if (aDue === bDue) {
+    return sortByDateDesc(a, b);
+  }
+  return aDue.localeCompare(bDue);
+};
+
+const getBusinessPayablesDashboard = (documents: ScannedDocument[], unknownSupplier: string): BusinessPayablesDashboard => {
+  const today = todayIsoDate();
+  const inSevenDays = addDaysToIsoDate(today, 7);
+  const supplierInvoices = documents.filter(isBusinessSupplierInvoice);
+  const openSupplierInvoices = supplierInvoices
+    .filter((document) => openSupplierPayableStatuses.has(document.paymentStatus))
+    .sort(sortByDueDateAsc);
+  const paidThisMonth = supplierInvoices
+    .filter((document) => document.paymentStatus === 'paid' && isThisMonth(document.paidDate))
+    .sort(sortByDateDesc);
+  const summaries = new Map<string, SupplierSummary>();
+
+  openSupplierInvoices.forEach((document) => {
+    const supplierName = getSupplierName(document, unknownSupplier);
+    const existing = summaries.get(supplierName) ?? {
+      supplierName,
+      openInvoiceCount: 0,
+      totalOpenAmount: 0,
+      nextDueDate: '',
+    };
+
+    existing.openInvoiceCount += 1;
+    existing.totalOpenAmount += parseAmount(document.amountTotal);
+    if (document.dueDate && (!existing.nextDueDate || document.dueDate < existing.nextDueDate)) {
+      existing.nextDueDate = document.dueDate;
+    }
+    summaries.set(supplierName, existing);
+  });
+
+  return {
+    overdue: openSupplierInvoices.filter((document) => Boolean(document.dueDate) && document.dueDate < today),
+    dueToday: openSupplierInvoices.filter((document) => document.dueDate === today),
+    dueThisWeek: openSupplierInvoices.filter(
+      (document) => Boolean(document.dueDate) && document.dueDate > today && document.dueDate <= inSevenDays,
+    ),
+    openSupplierInvoices,
+    paidThisMonth,
+    supplierSummaries: Array.from(summaries.values()).sort((a, b) => {
+      if (a.nextDueDate === b.nextDueDate) {
+        return b.totalOpenAmount - a.totalOpenAmount;
+      }
+      return (a.nextDueDate || '9999-12-31').localeCompare(b.nextDueDate || '9999-12-31');
+    }),
+  };
+};
+
 const reminderOrder = ['sevenDaysBefore', 'threeDaysBefore', 'dueDate'] as const;
 
 const formatReminderDate = (value?: string) => {
@@ -593,6 +677,10 @@ export default function App() {
 
   const recentDocuments = useMemo(() => homeDocuments.slice().sort(sortByDateDesc).slice(0, 8), [homeDocuments]);
   const expenseSummary = useMemo(() => getExpenseSummary(documents, appMode), [appMode, documents]);
+  const businessPayablesDashboard = useMemo(
+    () => getBusinessPayablesDashboard(documents, t.unknownSupplier),
+    [documents, t.unknownSupplier],
+  );
   const debtWarningDocuments = useMemo(
     () => (appMode === 'business' ? [] : homeDocuments.filter(isOpenDebtWarningDocument).sort(sortByDateDesc).slice(0, 5)),
     [appMode, homeDocuments],
@@ -817,6 +905,7 @@ export default function App() {
             expectedReimbursementDocuments={expectedReimbursementDocuments}
             recentDocuments={recentDocuments}
             expenseSummary={expenseSummary}
+            businessPayablesDashboard={businessPayablesDashboard}
             appMode={appMode}
             language={language}
             t={t}
@@ -896,6 +985,7 @@ function HomeScreen({
   expectedReimbursementDocuments,
   recentDocuments,
   expenseSummary,
+  businessPayablesDashboard,
   appMode,
   language,
   t,
@@ -909,6 +999,7 @@ function HomeScreen({
   expectedReimbursementDocuments: ScannedDocument[];
   recentDocuments: ScannedDocument[];
   expenseSummary: ExpenseSummary;
+  businessPayablesDashboard: BusinessPayablesDashboard;
   appMode: AppMode;
   language: Language;
   t: Translation;
@@ -984,32 +1075,42 @@ function HomeScreen({
         <Text style={styles.primaryButtonText}>{scanLabel}</Text>
       </Pressable>
 
-      {urgentDocuments.length > 0 ? (
+      {appMode === 'business' ? (
+        <BusinessPayablesSections
+          dashboard={businessPayablesDashboard}
+          t={t}
+          onOpenDocument={onOpenDocument}
+        />
+      ) : (
         <>
-          <SectionTitle title={appMode === 'business' ? t.urgentSupplierInvoices : t.urgentUnpaidBills} />
-          {urgentDocuments.map((document) => (
-            <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} urgent />
-          ))}
-        </>
-      ) : null}
+          {urgentDocuments.length > 0 ? (
+            <>
+              <SectionTitle title={t.urgentUnpaidBills} />
+              {urgentDocuments.map((document) => (
+                <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} urgent />
+              ))}
+            </>
+          ) : null}
 
-      {debtWarningDocuments.length > 0 ? (
-        <>
-          <SectionTitle title={t.debtWarnings} />
-          {debtWarningDocuments.map((document) => (
-            <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} urgent />
-          ))}
-        </>
-      ) : null}
+          {debtWarningDocuments.length > 0 ? (
+            <>
+              <SectionTitle title={t.debtWarnings} />
+              {debtWarningDocuments.map((document) => (
+                <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} urgent />
+              ))}
+            </>
+          ) : null}
 
-      {expectedReimbursementDocuments.length > 0 ? (
-        <>
-          <SectionTitle title={t.expectedReimbursements} />
-          {expectedReimbursementDocuments.map((document) => (
-            <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} />
-          ))}
+          {expectedReimbursementDocuments.length > 0 ? (
+            <>
+              <SectionTitle title={t.expectedReimbursements} />
+              {expectedReimbursementDocuments.map((document) => (
+                <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} />
+              ))}
+            </>
+          ) : null}
         </>
-      ) : null}
+      )}
 
       <ExpenseSummarySection summary={expenseSummary} appMode={appMode} t={t} />
 
@@ -1020,10 +1121,120 @@ function HomeScreen({
         <EmptyState text={appMode === 'business' ? t.supplierInvoicesEmpty : t.scannedDocumentsEmpty} />
       ) : (
         recentDocuments.map((document) => (
-          <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} />
+          <DocumentRow key={document.id} document={document} appMode={appMode} t={t} onPress={() => onOpenDocument(document)} />
         ))
       )}
     </ScrollView>
+  );
+}
+
+function BusinessPayablesSections({
+  dashboard,
+  t,
+  onOpenDocument,
+}: {
+  dashboard: BusinessPayablesDashboard;
+  t: Translation;
+  onOpenDocument: (document: ScannedDocument) => void;
+}) {
+  return (
+    <>
+      <BusinessDocumentSection
+        title={t.overdue}
+        documents={dashboard.overdue}
+        t={t}
+        urgent
+        onOpenDocument={onOpenDocument}
+      />
+      <BusinessDocumentSection
+        title={t.dueToday}
+        documents={dashboard.dueToday}
+        t={t}
+        urgent
+        onOpenDocument={onOpenDocument}
+      />
+      <BusinessDocumentSection
+        title={t.dueThisWeek}
+        documents={dashboard.dueThisWeek}
+        t={t}
+        onOpenDocument={onOpenDocument}
+      />
+      <SupplierSummarySection summaries={dashboard.supplierSummaries} t={t} />
+      <BusinessDocumentSection
+        title={t.openSupplierInvoicesSection}
+        documents={dashboard.openSupplierInvoices}
+        t={t}
+        onOpenDocument={onOpenDocument}
+      />
+      <BusinessDocumentSection
+        title={t.paidThisMonthSection}
+        documents={dashboard.paidThisMonth}
+        t={t}
+        onOpenDocument={onOpenDocument}
+      />
+    </>
+  );
+}
+
+function BusinessDocumentSection({
+  title,
+  documents,
+  t,
+  urgent = false,
+  onOpenDocument,
+}: {
+  title: string;
+  documents: ScannedDocument[];
+  t: Translation;
+  urgent?: boolean;
+  onOpenDocument: (document: ScannedDocument) => void;
+}) {
+  return (
+    <>
+      <SectionTitle title={title} />
+      {documents.length > 0 ? (
+        documents.map((document) => (
+          <DocumentRow
+            key={document.id}
+            document={document}
+            appMode="business"
+            t={t}
+            urgent={urgent}
+            onPress={() => onOpenDocument(document)}
+          />
+        ))
+      ) : (
+        <EmptyState text={t.noBusinessPayables} />
+      )}
+    </>
+  );
+}
+
+function SupplierSummarySection({ summaries, t }: { summaries: SupplierSummary[]; t: Translation }) {
+  return (
+    <>
+      <SectionTitle title={t.supplierSummary} />
+      {summaries.length > 0 ? (
+        <View style={styles.supplierSummaryGrid}>
+          {summaries.map((summary) => (
+            <View key={summary.supplierName} style={styles.supplierSummaryCard}>
+              <Text style={styles.supplierSummaryName}>{summary.supplierName}</Text>
+              <View style={styles.supplierSummaryMetrics}>
+                <Text style={styles.supplierSummaryMetric}>
+                  {t.openInvoicesShort}: {summary.openInvoiceCount}
+                </Text>
+                <Text style={styles.supplierSummaryMetric}>{formatEuro(summary.totalOpenAmount)}</Text>
+                <Text style={styles.supplierSummaryMuted}>
+                  {t.nextDueDate}: {summary.nextDueDate || '-'}
+                </Text>
+              </View>
+            </View>
+          ))}
+        </View>
+      ) : (
+        <EmptyState text={t.noBusinessPayables} />
+      )}
+    </>
   );
 }
 
@@ -1630,11 +1841,13 @@ function ExpenseReviewFields({
 
 function DocumentRow({
   document,
+  appMode = 'private',
   t,
   onPress,
   urgent = false,
 }: {
   document: ScannedDocument;
+  appMode?: AppMode;
   t: Translation;
   onPress: () => void;
   urgent?: boolean;
@@ -1652,7 +1865,7 @@ function DocumentRow({
   return (
     <Pressable style={[styles.documentRow, urgent && styles.urgentRow]} onPress={onPress}>
       <View style={styles.documentTextBlock}>
-        <Text style={styles.documentTitle}>{document.senderName || document.creditorName || t.unknownSender}</Text>
+        <Text style={styles.documentTitle}>{getDocumentTitle(document, appMode, t)}</Text>
         <Text style={styles.documentMeta}>
           {getDocumentTypeLabel(t, document.documentType)} - {getPaymentStatusLabel(t, document.paymentStatus)}
         </Text>
@@ -2044,6 +2257,35 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   categoryMetricMuted: {
+    color: '#65716d',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  supplierSummaryGrid: {
+    gap: 8,
+  },
+  supplierSummaryCard: {
+    backgroundColor: '#ffffff',
+    borderColor: '#e5ddd1',
+    borderRadius: 8,
+    borderWidth: 1,
+    padding: 12,
+  },
+  supplierSummaryName: {
+    color: '#153433',
+    fontSize: 16,
+    fontWeight: '800',
+    marginBottom: 8,
+  },
+  supplierSummaryMetrics: {
+    gap: 4,
+  },
+  supplierSummaryMetric: {
+    color: '#153433',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  supplierSummaryMuted: {
     color: '#65716d',
     fontSize: 13,
     fontWeight: '700',
