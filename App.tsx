@@ -27,10 +27,13 @@ import {
 import { deleteAllDocuments, deleteDocument, getDocuments, upsertDocument } from './services/documentStorage';
 import { BACKEND_HEALTH_URL, OCR_MODE, scanDocumentWithOcr } from './services/ocrService';
 import {
+  AppMode,
+  appModeValues,
+  businessExpenseCategoryValues,
   documentTypeValues,
   DocumentType,
   ExpenseCategory,
-  expenseCategoryValues,
+  privateExpenseCategoryValues,
   cashflowTypeValues,
   inkassoChecklistItems,
   paymentStatusValues,
@@ -91,6 +94,7 @@ const openExpenseStatuses = new Set<ScannedDocument['paymentStatus']>(['needs_re
 const receivableOpenStatuses = new Set<ScannedDocument['paymentStatus']>(['needs_review', 'expected', 'waiting_reimbursement']);
 const blockedPaymentPreparationStatuses = new Set<ScannedDocument['paymentStatus']>(['paid', 'closed']);
 const LANGUAGE_STORAGE_KEY = 'rechnungguard.language.v1';
+const APP_MODE_STORAGE_KEY = 'rechnungguard.appMode.v1';
 const PRIVACY_NOTICE_ACCEPTED_STORAGE_KEY = 'rechnungguard.privacyNoticeAccepted.v1';
 const STORE_DOCUMENT_IMAGES_STORAGE_KEY = 'rechnungguard.storeDocumentImages.v1';
 
@@ -141,6 +145,18 @@ const reminderOrInkassoFields = new Set<EditableField>([
   'actionRecommendation',
 ]);
 const paymentPreparationFields = new Set<EditableField>(['iban', 'bic', 'paymentReference']);
+const businessReviewFields = new Set<EditableField>([
+  'paymentStatus',
+  'senderName',
+  'creditorName',
+  'amountTotal',
+  'dueDate',
+  'invoiceNumber',
+  'customerNumber',
+  'iban',
+  'paymentReference',
+]);
+const businessPaymentStatusValues: PaymentStatus[] = ['needs_review', 'unpaid', 'paid', 'disputed', 'closed'];
 
 const sortByDateDesc = (a: ScannedDocument, b: ScannedDocument) =>
   new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
@@ -186,6 +202,8 @@ const getPaymentMethodLabel = (t: Translation, value: ScannedDocument['paymentMe
   t.paymentMethods[value] ?? value;
 const getBooleanLabel = (t: Translation, value: boolean) => (value ? t.yes : t.no);
 const getFieldLabel = (t: Translation, field: FieldLabelKey) => t.fields[field] || translations.de.fields[field] || field;
+const getModeFieldLabel = (t: Translation, appMode: AppMode, field: FieldLabelKey) =>
+  appMode === 'business' && field === 'creditorName' ? t.fields.businessCreditorName : getFieldLabel(t, field);
 
 const copyToClipboard = (value: string) => Clipboard.setStringAsync(value);
 
@@ -221,6 +239,31 @@ const shouldShowEditableField = (document: ScannedDocument, field: EditableField
 
 const getVisibleFields = (document: ScannedDocument, fields: EditableField[]) =>
   fields.filter((field) => shouldShowEditableField(document, field));
+
+const getVisibleReviewFields = (document: ScannedDocument, fields: EditableField[], appMode: AppMode) => {
+  const visibleFields = getVisibleFields(document, fields);
+  return appMode === 'business' ? visibleFields.filter((field) => businessReviewFields.has(field)) : visibleFields;
+};
+
+const isAppMode = (value: string | null): value is AppMode =>
+  typeof value === 'string' && appModeValues.includes(value as AppMode);
+
+const isBusinessSupplierInvoice = (document: ScannedDocument) =>
+  document.cashflowType === 'payable' && document.documentType !== 'payment_proof';
+
+const asBusinessSupplierInvoice = (document: ScannedDocument): ScannedDocument => ({
+  ...document,
+  documentType: document.documentType === 'unknown' ? 'invoice' : document.documentType,
+  cashflowType: 'payable',
+  isExpense: true,
+  expenseCategory: businessExpenseCategoryValues.includes(document.expenseCategory) ? document.expenseCategory : 'other',
+  amountReceivable: '',
+  expectedPaymentDate: '',
+  receivedDate: '',
+});
+
+const getExpenseCategoryValuesForMode = (appMode: AppMode) =>
+  appMode === 'business' ? businessExpenseCategoryValues : privateExpenseCategoryValues;
 
 const mentionsMahnbescheid = (document: ScannedDocument) =>
   [
@@ -371,18 +414,19 @@ const isThisMonth = (value: string) => {
   return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth();
 };
 
-const createEmptyCategoryBreakdown = (): ExpenseCategorySummary[] =>
-  expenseCategoryValues.map((category) => ({
+const createEmptyCategoryBreakdown = (appMode: AppMode): ExpenseCategorySummary[] =>
+  getExpenseCategoryValuesForMode(appMode).map((category) => ({
     category,
     openAmount: 0,
     paidOrReceivedThisMonth: 0,
   }));
 
-const getExpenseSummary = (documents: ScannedDocument[]): ExpenseSummary => {
-  const categoryBreakdown = createEmptyCategoryBreakdown();
+const getExpenseSummary = (documents: ScannedDocument[], appMode: AppMode): ExpenseSummary => {
+  const summaryDocuments = appMode === 'business' ? documents.filter(isBusinessSupplierInvoice) : documents;
+  const categoryBreakdown = createEmptyCategoryBreakdown(appMode);
   const categoryByName = new Map(categoryBreakdown.map((item) => [item.category, item]));
 
-  return documents.reduce<ExpenseSummary>(
+  return summaryDocuments.reduce<ExpenseSummary>(
     (summary, document) => {
       if (document.cashflowType === 'receivable') {
         const receivableAmount = parseAmount(document.amountReceivable || document.amountTotal);
@@ -477,6 +521,7 @@ export default function App() {
   const [isSavingStatus, setIsSavingStatus] = useState(false);
   const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(null);
   const [language, setLanguage] = useState<Language>(defaultLanguage);
+  const [appMode, setAppMode] = useState<AppMode>('private');
   const [privacyNoticeAccepted, setPrivacyNoticeAccepted] = useState(false);
   const [storeDocumentImages, setStoreDocumentImages] = useState(false);
   const t = translations[language];
@@ -491,14 +536,20 @@ export default function App() {
   }, [loadDocuments]);
 
   useEffect(() => {
-    const loadLanguage = async () => {
-      const storedLanguage = await AsyncStorage.getItem(LANGUAGE_STORAGE_KEY);
+    const loadLocalSettings = async () => {
+      const [storedLanguage, storedAppMode] = await Promise.all([
+        AsyncStorage.getItem(LANGUAGE_STORAGE_KEY),
+        AsyncStorage.getItem(APP_MODE_STORAGE_KEY),
+      ]);
       if (isLanguage(storedLanguage)) {
         setLanguage(storedLanguage);
       }
+      if (isAppMode(storedAppMode)) {
+        setAppMode(storedAppMode);
+      }
     };
 
-    loadLanguage();
+    loadLocalSettings();
   }, []);
 
   useEffect(() => {
@@ -519,25 +570,36 @@ export default function App() {
     await AsyncStorage.setItem(LANGUAGE_STORAGE_KEY, nextLanguage);
   };
 
+  const changeAppMode = async (nextAppMode: AppMode) => {
+    setAppMode(nextAppMode);
+    await AsyncStorage.setItem(APP_MODE_STORAGE_KEY, nextAppMode);
+  };
+
   const changeStoreDocumentImages = async (enabled: boolean) => {
     setStoreDocumentImages(enabled);
     await AsyncStorage.setItem(STORE_DOCUMENT_IMAGES_STORAGE_KEY, enabled ? 'true' : 'false');
   };
 
-  const urgentDocuments = useMemo(() => documents.filter(isUrgent).sort((a, b) => {
+  const homeDocuments = useMemo(
+    () => (appMode === 'business' ? documents.filter(isBusinessSupplierInvoice) : documents),
+    [appMode, documents],
+  );
+
+  const urgentDocuments = useMemo(() => homeDocuments.filter(isUrgent).sort((a, b) => {
     const aDue = a.dueDate ? new Date(a.dueDate).getTime() : Number.POSITIVE_INFINITY;
     const bDue = b.dueDate ? new Date(b.dueDate).getTime() : Number.POSITIVE_INFINITY;
     return aDue - bDue;
-  }), [documents]);
+  }), [homeDocuments]);
 
-  const recentDocuments = useMemo(() => documents.slice().sort(sortByDateDesc).slice(0, 8), [documents]);
+  const recentDocuments = useMemo(() => homeDocuments.slice().sort(sortByDateDesc).slice(0, 8), [homeDocuments]);
+  const expenseSummary = useMemo(() => getExpenseSummary(documents, appMode), [appMode, documents]);
   const debtWarningDocuments = useMemo(
-    () => documents.filter(isOpenDebtWarningDocument).sort(sortByDateDesc).slice(0, 5),
-    [documents],
+    () => (appMode === 'business' ? [] : homeDocuments.filter(isOpenDebtWarningDocument).sort(sortByDateDesc).slice(0, 5)),
+    [appMode, homeDocuments],
   );
   const expectedReimbursementDocuments = useMemo(
-    () => documents.filter(isExpectedReimbursementDocument).sort(sortByDateDesc).slice(0, 5),
-    [documents],
+    () => (appMode === 'business' ? [] : homeDocuments.filter(isExpectedReimbursementDocument).sort(sortByDateDesc).slice(0, 5)),
+    [appMode, homeDocuments],
   );
 
   useEffect(() => {
@@ -625,6 +687,7 @@ export default function App() {
     await deleteAllDocuments();
     await AsyncStorage.multiRemove([
       LANGUAGE_STORAGE_KEY,
+      APP_MODE_STORAGE_KEY,
       PRIVACY_NOTICE_ACCEPTED_STORAGE_KEY,
       STORE_DOCUMENT_IMAGES_STORAGE_KEY,
     ]);
@@ -633,6 +696,7 @@ export default function App() {
     setSelectedDocument(null);
     setSelectedImageUri(null);
     setLanguage(defaultLanguage);
+    setAppMode('private');
     setPrivacyNoticeAccepted(false);
     setStoreDocumentImages(false);
     setScreen('home');
@@ -711,10 +775,11 @@ export default function App() {
     setIsLoading(true);
     try {
       try {
-        const document = await scanDocumentWithOcr(selectedImageUri);
-        if (OCR_MODE === 'backend' && document.ocrSource !== 'backend') {
+        const scannedDocument = await scanDocumentWithOcr(selectedImageUri);
+        if (OCR_MODE === 'backend' && scannedDocument.ocrSource !== 'backend') {
           throw new Error('Backend OCR mode did not return backend data.');
         }
+        const document = appMode === 'business' ? asBusinessSupplierInvoice(scannedDocument) : scannedDocument;
         setDraft({
           ...document,
           imageUri: storeDocumentImages ? document.imageUri : '',
@@ -751,8 +816,11 @@ export default function App() {
             debtWarningDocuments={debtWarningDocuments}
             expectedReimbursementDocuments={expectedReimbursementDocuments}
             recentDocuments={recentDocuments}
+            expenseSummary={expenseSummary}
+            appMode={appMode}
             language={language}
             t={t}
+            onChangeAppMode={changeAppMode}
             onChangeLanguage={changeLanguage}
             onScan={() => {
               setSelectedImageUri(null);
@@ -766,6 +834,7 @@ export default function App() {
         {screen === 'scan' ? (
           <ScanScreen
             backendStatus={backendStatus}
+            appMode={appMode}
             imageUri={selectedImageUri}
             isLoading={isLoading}
             t={t}
@@ -777,6 +846,7 @@ export default function App() {
         {screen === 'review' && draft ? (
           <ReviewScreen
             draft={draft}
+            appMode={appMode}
             t={t}
             onChange={setDraft}
             onSave={() => saveDocument(draft)}
@@ -786,6 +856,7 @@ export default function App() {
         {screen === 'detail' && selectedDocument ? (
           <DetailScreen
             document={selectedDocument}
+            appMode={appMode}
             isSavingStatus={isSavingStatus}
             t={t}
             onChange={setSelectedDocument}
@@ -824,8 +895,11 @@ function HomeScreen({
   debtWarningDocuments,
   expectedReimbursementDocuments,
   recentDocuments,
+  expenseSummary,
+  appMode,
   language,
   t,
+  onChangeAppMode,
   onChangeLanguage,
   onScan,
   onOpenDocument,
@@ -834,13 +908,17 @@ function HomeScreen({
   debtWarningDocuments: ScannedDocument[];
   expectedReimbursementDocuments: ScannedDocument[];
   recentDocuments: ScannedDocument[];
+  expenseSummary: ExpenseSummary;
+  appMode: AppMode;
   language: Language;
   t: Translation;
+  onChangeAppMode: (appMode: AppMode) => void;
   onChangeLanguage: (language: Language) => void;
   onScan: () => void;
   onOpenDocument: (document: ScannedDocument) => void;
 }) {
   const hasDocuments = recentDocuments.length > 0;
+  const scanLabel = appMode === 'business' ? t.scanSupplierInvoice : t.scanBillOrLetter;
 
   return (
     <ScrollView contentContainerStyle={styles.scrollContent}>
@@ -855,6 +933,29 @@ function HomeScreen({
           {t.appTitle}
         </Text>
         <Text style={styles.promise}>{t.promise}</Text>
+      </View>
+
+      <View style={styles.languageSetting}>
+        <Text style={styles.inputLabel}>{t.appModeSetting}</Text>
+        <View style={styles.segmentedControl}>
+          <Pressable
+            style={[styles.segmentButton, appMode === 'private' && styles.segmentButtonSelected]}
+            onPress={() => onChangeAppMode('private')}
+          >
+            <Text style={[styles.segmentButtonText, appMode === 'private' && styles.segmentButtonTextSelected]}>
+              {t.privateMode}
+            </Text>
+          </Pressable>
+          <Pressable
+            style={[styles.segmentButton, appMode === 'business' && styles.segmentButtonSelected]}
+            onPress={() => onChangeAppMode('business')}
+          >
+            <Text style={[styles.segmentButtonText, appMode === 'business' && styles.segmentButtonTextSelected]}>
+              {t.businessMode}
+            </Text>
+          </Pressable>
+        </View>
+        {appMode === 'business' ? <Text style={styles.settingHint}>{t.businessHelperText}</Text> : null}
       </View>
 
       <View style={styles.languageSetting}>
@@ -880,12 +981,12 @@ function HomeScreen({
       </View>
 
       <Pressable style={styles.primaryButton} onPress={onScan}>
-        <Text style={styles.primaryButtonText}>{t.scanBillOrLetter}</Text>
+        <Text style={styles.primaryButtonText}>{scanLabel}</Text>
       </Pressable>
 
       {urgentDocuments.length > 0 ? (
         <>
-          <SectionTitle title={t.urgentUnpaidBills} />
+          <SectionTitle title={appMode === 'business' ? t.urgentSupplierInvoices : t.urgentUnpaidBills} />
           {urgentDocuments.map((document) => (
             <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} urgent />
           ))}
@@ -910,9 +1011,13 @@ function HomeScreen({
         </>
       ) : null}
 
-      {hasDocuments ? <SectionTitle title={t.recentScannedDocuments} /> : null}
+      <ExpenseSummarySection summary={expenseSummary} appMode={appMode} t={t} />
+
+      {hasDocuments ? (
+        <SectionTitle title={appMode === 'business' ? t.recentScannedSupplierInvoices : t.recentScannedDocuments} />
+      ) : null}
       {!hasDocuments ? (
-        <EmptyState text={t.scannedDocumentsEmpty} />
+        <EmptyState text={appMode === 'business' ? t.supplierInvoicesEmpty : t.scannedDocumentsEmpty} />
       ) : (
         recentDocuments.map((document) => (
           <DocumentRow key={document.id} document={document} t={t} onPress={() => onOpenDocument(document)} />
@@ -924,6 +1029,7 @@ function HomeScreen({
 
 function ScanScreen({
   backendStatus,
+  appMode,
   imageUri,
   isLoading,
   t,
@@ -931,6 +1037,7 @@ function ScanScreen({
   onProcessImage,
 }: {
   backendStatus: BackendStatus | null;
+  appMode: AppMode;
   imageUri: string | null;
   isLoading: boolean;
   t: Translation;
@@ -948,7 +1055,8 @@ function ScanScreen({
 
   return (
     <ScrollView contentContainerStyle={styles.scanContent}>
-      <Text style={styles.screenTitle}>{t.scanBillOrLetter}</Text>
+      <Text style={styles.screenTitle}>{appMode === 'business' ? t.scanSupplierInvoice : t.scanBillOrLetter}</Text>
+      {appMode === 'business' ? <Text style={styles.subtleText}>{t.businessHelperText}</Text> : null}
       <View style={styles.statusBadgeGroup}>
         {statusText ? <Text style={styles.modeBadge}>{statusText}</Text> : null}
       </View>
@@ -979,11 +1087,13 @@ function ScanScreen({
 
 function ReviewScreen({
   draft,
+  appMode,
   t,
   onChange,
   onSave,
 }: {
   draft: ScannedDocument;
+  appMode: AppMode;
   t: Translation;
   onChange: (document: ScannedDocument) => void;
   onSave: () => void;
@@ -992,7 +1102,7 @@ function ReviewScreen({
     <ScrollView contentContainerStyle={styles.scrollContent}>
       <Text style={styles.screenTitle}>{t.reviewScan}</Text>
       <ImagePreview imageUri={draft.imageUri} t={t} />
-      <DocumentForm document={draft} t={t} onChange={onChange} />
+      <DocumentForm document={draft} appMode={appMode} t={t} onChange={onChange} />
       <Pressable style={styles.primaryButton} onPress={onSave}>
         <Text style={styles.primaryButtonText}>{t.save}</Text>
       </Pressable>
@@ -1002,6 +1112,7 @@ function ReviewScreen({
 
 function DetailScreen({
   document,
+  appMode,
   isSavingStatus,
   t,
   onChange,
@@ -1011,6 +1122,7 @@ function DetailScreen({
   onSave,
 }: {
   document: ScannedDocument;
+  appMode: AppMode;
   isSavingStatus: boolean;
   t: Translation;
   onChange: (document: ScannedDocument) => void;
@@ -1091,7 +1203,7 @@ function DetailScreen({
         <Text style={styles.detailValue}>{getBooleanLabel(t, document.isExpense)}</Text>
       </View>
       <View style={styles.detailRow}>
-        <Text style={styles.detailLabel}>{getFieldLabel(t, 'expenseCategory')}</Text>
+        <Text style={styles.detailLabel}>{getModeFieldLabel(t, appMode, 'expenseCategory')}</Text>
         <Text style={styles.detailValue}>{getExpenseCategoryLabel(t, document.expenseCategory)}</Text>
       </View>
       <View style={styles.detailRow}>
@@ -1111,9 +1223,9 @@ function DetailScreen({
         <Text style={styles.detailValue}>{getBooleanLabel(t, document.reimbursable)}</Text>
       </View>
 
-      {getVisibleFields(document, fieldOrder).map((field) => (
+      {getVisibleReviewFields(document, fieldOrder, appMode).map((field) => (
         <View key={field} style={styles.detailRow}>
-          <Text style={styles.detailLabel}>{getFieldLabel(t, field)}</Text>
+          <Text style={styles.detailLabel}>{getModeFieldLabel(t, appMode, field)}</Text>
           <Text style={styles.detailValue}>{getDetailValue(t, document, field)}</Text>
         </View>
       ))}
@@ -1315,10 +1427,12 @@ function AppButton({
 
 function DocumentForm({
   document,
+  appMode,
   t,
   onChange,
 }: {
   document: ScannedDocument;
+  appMode: AppMode;
   t: Translation;
   onChange: (document: ScannedDocument) => void;
 }) {
@@ -1331,13 +1445,13 @@ function DocumentForm({
       field === 'documentType'
         ? documentTypeValues
         : field === 'paymentStatus'
-          ? paymentStatusValues
+          ? appMode === 'business' ? businessPaymentStatusValues : paymentStatusValues
           : field === 'cashflowType'
             ? cashflowTypeValues
             : field === 'urgencyLevel'
               ? urgencyLevelValues
               : null;
-    const label = getFieldLabel(t, field);
+    const label = getModeFieldLabel(t, appMode, field);
 
     return (
       <View key={field} style={styles.inputGroup}>
@@ -1380,8 +1494,8 @@ function DocumentForm({
     );
   };
 
-  const primaryFields = getVisibleFields(document, primaryReviewFields);
-  const advancedFields = getVisibleFields(document, advancedReviewFields);
+  const primaryFields = getVisibleReviewFields(document, primaryReviewFields, appMode);
+  const advancedFields = getVisibleReviewFields(document, advancedReviewFields, appMode);
 
   return (
     <View>
@@ -1392,24 +1506,29 @@ function DocumentForm({
           {advancedFields.map(renderField)}
         </View>
       ) : null}
-      <ExpenseReviewFields document={document} t={t} onChange={onChange} />
+      <ExpenseReviewFields document={document} appMode={appMode} t={t} onChange={onChange} />
     </View>
   );
 }
 
-function ExpenseSummarySection({ summary, t }: { summary: ExpenseSummary; t: Translation }) {
+function ExpenseSummarySection({ summary, appMode, t }: { summary: ExpenseSummary; appMode: AppMode; t: Translation }) {
   const activeCategories = summary.categoryBreakdown.filter(
     (item) => item.openAmount > 0 || item.paidOrReceivedThisMonth > 0,
   );
 
   return (
     <View style={styles.summarySection}>
-      <Text style={styles.sectionTitle}>{t.expenseSummary}</Text>
+      <Text style={styles.sectionTitle}>{appMode === 'business' ? t.businessExpenseSummary : t.expenseSummary}</Text>
       <View style={styles.summaryGrid}>
         <SummaryTile label={t.openPayableAmount} value={formatEuro(summary.openAmount)} />
-        <SummaryTile label={t.expectedReceivableAmount} value={formatEuro(summary.expectedReceivableAmount)} />
+        {appMode === 'private' ? (
+          <SummaryTile label={t.expectedReceivableAmount} value={formatEuro(summary.expectedReceivableAmount)} />
+        ) : null}
         <SummaryTile label={t.paidOrReceivedThisMonth} value={formatEuro(summary.paidOrReceivedThisMonth)} />
-        <SummaryTile label={t.openInvoiceCount} value={String(summary.openInvoiceCount)} />
+        <SummaryTile
+          label={appMode === 'business' ? t.openSupplierInvoiceCount : t.openInvoiceCount}
+          value={String(summary.openInvoiceCount)}
+        />
       </View>
       {activeCategories.length > 0 ? (
         <>
@@ -1448,29 +1567,32 @@ function SummaryTile({ label, value }: { label: string; value: string }) {
 
 function ExpenseReviewFields({
   document,
+  appMode,
   t,
   onChange,
 }: {
   document: ScannedDocument;
+  appMode: AppMode;
   t: Translation;
   onChange: (document: ScannedDocument) => void;
 }) {
   const toggleField = (field: 'taxRelevant' | 'reimbursable') => {
     onChange({ ...document, [field]: !document[field], isExpense: document.cashflowType === 'payable' });
   };
+  const categoryValues = getExpenseCategoryValuesForMode(appMode);
 
   return (
     <View style={styles.formSection}>
       <Text style={styles.sectionTitle}>{t.categorization}</Text>
       <View style={styles.inputGroup}>
-        <Text style={styles.inputLabel}>{getFieldLabel(t, 'expenseCategory')}</Text>
+        <Text style={styles.inputLabel}>{getModeFieldLabel(t, appMode, 'expenseCategory')}</Text>
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
           style={styles.pillScroller}
           contentContainerStyle={styles.pillRow}
         >
-          {expenseCategoryValues.map((option) => (
+          {categoryValues.map((option) => (
             <Pressable
               key={option}
               style={[styles.pill, document.expenseCategory === option && styles.pillSelected]}

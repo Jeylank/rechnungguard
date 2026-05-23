@@ -28,6 +28,7 @@ export type PaymentStatus =
 
 export type UrgencyLevel = 'low' | 'medium' | 'high' | 'critical';
 export type CashflowType = 'payable' | 'receivable' | 'neutral' | 'unknown';
+export type AppMode = 'private' | 'business';
 
 export type ExpenseCategory =
   | 'rent'
@@ -43,6 +44,13 @@ export type ExpenseCategory =
   | 'education'
   | 'travel'
   | 'legal'
+  | 'goods_purchasing'
+  | 'beverages'
+  | 'meat_halal'
+  | 'fruit_vegetables'
+  | 'frozen_goods'
+  | 'packaging'
+  | 'cleaning'
   | 'other';
 
 export type PaymentMethod = 'unknown' | 'bank_transfer' | 'direct_debit' | 'card' | 'cash' | 'paypal' | 'other';
@@ -143,8 +151,9 @@ export const paymentStatusValues: PaymentStatus[] = [
 
 export const urgencyLevelValues: UrgencyLevel[] = ['low', 'medium', 'high', 'critical'];
 export const cashflowTypeValues: CashflowType[] = ['payable', 'receivable', 'neutral', 'unknown'];
+export const appModeValues: AppMode[] = ['private', 'business'];
 
-export const expenseCategoryValues: ExpenseCategory[] = [
+export const privateExpenseCategoryValues: ExpenseCategory[] = [
   'rent',
   'housing',
   'energy',
@@ -159,6 +168,25 @@ export const expenseCategoryValues: ExpenseCategory[] = [
   'travel',
   'legal',
   'other',
+];
+
+export const businessExpenseCategoryValues: ExpenseCategory[] = [
+  'goods_purchasing',
+  'beverages',
+  'meat_halal',
+  'fruit_vegetables',
+  'frozen_goods',
+  'packaging',
+  'cleaning',
+  'rent',
+  'energy',
+  'insurance',
+  'other',
+];
+
+export const expenseCategoryValues: ExpenseCategory[] = [
+  ...privateExpenseCategoryValues,
+  ...businessExpenseCategoryValues.filter((category) => !privateExpenseCategoryValues.includes(category)),
 ];
 
 export const paymentMethodValues: PaymentMethod[] = [
