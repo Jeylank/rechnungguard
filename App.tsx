@@ -105,6 +105,11 @@ type BusinessPayablesDashboard = {
   supplierSummaries: SupplierSummary[];
 };
 
+type DuplicateInvoiceCandidate = {
+  document: ScannedDocument;
+  strength: 'strong' | 'possible';
+};
+
 const unpaidStatuses = new Set(['needs_review', 'unpaid', 'sent_to_insurance', 'waiting_reimbursement']);
 const openExpenseStatuses = new Set<ScannedDocument['paymentStatus']>(['needs_review', 'unpaid']);
 const openSupplierPayableStatuses = new Set<ScannedDocument['paymentStatus']>(['needs_review', 'unpaid', 'disputed']);
@@ -239,6 +244,35 @@ const getSupplierName = (document: ScannedDocument, fallback: string) =>
 const getDocumentTitle = (document: ScannedDocument, appMode: AppMode, t: Translation) =>
   appMode === 'business' ? getSupplierName(document, t.unknownSupplier) : document.senderName || document.creditorName || t.unknownSender;
 
+const normalizeMatchText = (value?: string) =>
+  (value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+
+const getSupplierMatchNames = (document: ScannedDocument) =>
+  [document.supplierName, document.creditorName]
+    .map(normalizeMatchText)
+    .filter((value): value is string => value.length > 0);
+
+const hasSameSupplierOrCreditor = (a: ScannedDocument, b: ScannedDocument) => {
+  const aNames = getSupplierMatchNames(a);
+  const bNames = new Set(getSupplierMatchNames(b));
+  return aNames.some((name) => bNames.has(name));
+};
+
+const hasSameInvoiceNumber = (a: ScannedDocument, b: ScannedDocument) => {
+  const aInvoiceNumber = normalizeMatchText(a.invoiceNumber);
+  const bInvoiceNumber = normalizeMatchText(b.invoiceNumber);
+  return Boolean(aInvoiceNumber && bInvoiceNumber && aInvoiceNumber === bInvoiceNumber);
+};
+
+const hasSameAmount = (a: ScannedDocument, b: ScannedDocument) => {
+  const aAmount = parseAmount(a.amountTotal);
+  const bAmount = parseAmount(b.amountTotal);
+  return aAmount > 0 && bAmount > 0 && Math.round(aAmount * 100) === Math.round(bAmount * 100);
+};
+
 const hasEditableFieldValue = (document: ScannedDocument, field: EditableField) => {
   const value = document[field];
   return typeof value === 'string' ? value.trim().length > 0 : Boolean(value);
@@ -279,6 +313,7 @@ const asBusinessSupplierInvoice = (document: ScannedDocument): ScannedDocument =
   documentType: document.documentType === 'unknown' ? 'invoice' : document.documentType,
   cashflowType: 'payable',
   isExpense: true,
+  supplierName: document.supplierName || document.creditorName || document.senderName,
   expenseCategory: businessExpenseCategoryValues.includes(document.expenseCategory) ? document.expenseCategory : 'other',
   amountReceivable: '',
   expectedPaymentDate: '',
@@ -498,6 +533,54 @@ const addDaysToIsoDate = (isoDate: string, days: number) => {
   return date.toISOString().slice(0, 10);
 };
 
+const getDateDistanceInDays = (a: string, b: string) => {
+  if (!a || !b) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const aTime = new Date(`${a}T00:00:00`).getTime();
+  const bTime = new Date(`${b}T00:00:00`).getTime();
+  if (Number.isNaN(aTime) || Number.isNaN(bTime)) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  return Math.abs(aTime - bTime) / (24 * 60 * 60 * 1000);
+};
+
+const hasCloseInvoiceDate = (a: ScannedDocument, b: ScannedDocument) =>
+  getDateDistanceInDays(a.invoiceDate, b.invoiceDate) <= 7;
+
+const hasCloseDueDate = (a: ScannedDocument, b: ScannedDocument) =>
+  getDateDistanceInDays(a.dueDate, b.dueDate) <= 7;
+
+const getDuplicateInvoiceCandidate = (
+  draft: ScannedDocument | null,
+  documents: ScannedDocument[],
+): DuplicateInvoiceCandidate | null => {
+  if (!draft || !isBusinessSupplierInvoice(draft)) {
+    return null;
+  }
+
+  let possibleCandidate: DuplicateInvoiceCandidate | null = null;
+
+  for (const document of documents) {
+    if (document.id === draft.id || !isBusinessSupplierInvoice(document) || !hasSameSupplierOrCreditor(draft, document)) {
+      continue;
+    }
+
+    const sameAmount = hasSameAmount(draft, document);
+    if (hasSameInvoiceNumber(draft, document) && sameAmount) {
+      return { document, strength: 'strong' };
+    }
+
+    if (sameAmount && (hasCloseInvoiceDate(draft, document) || hasCloseDueDate(draft, document))) {
+      possibleCandidate = possibleCandidate ?? { document, strength: 'possible' };
+    }
+  }
+
+  return possibleCandidate;
+};
+
 const sortByDueDateAsc = (a: ScannedDocument, b: ScannedDocument) => {
   const aDue = a.dueDate || '9999-12-31';
   const bDue = b.dueDate || '9999-12-31';
@@ -677,6 +760,10 @@ export default function App() {
 
   const recentDocuments = useMemo(() => homeDocuments.slice().sort(sortByDateDesc).slice(0, 8), [homeDocuments]);
   const expenseSummary = useMemo(() => getExpenseSummary(documents, appMode), [appMode, documents]);
+  const duplicateInvoiceCandidate = useMemo(
+    () => (appMode === 'business' ? getDuplicateInvoiceCandidate(draft, documents) : null),
+    [appMode, documents, draft],
+  );
   const businessPayablesDashboard = useMemo(
     () => getBusinessPayablesDashboard(documents, t.unknownSupplier),
     [documents, t.unknownSupplier],
@@ -935,6 +1022,7 @@ export default function App() {
         {screen === 'review' && draft ? (
           <ReviewScreen
             draft={draft}
+            duplicateCandidate={duplicateInvoiceCandidate}
             appMode={appMode}
             t={t}
             onChange={setDraft}
@@ -1028,20 +1116,20 @@ function HomeScreen({
 
       <View style={styles.languageSetting}>
         <Text style={styles.inputLabel}>{t.appModeSetting}</Text>
-        <View style={styles.segmentedControl}>
+        <View style={styles.languageButtons}>
           <Pressable
-            style={[styles.segmentButton, appMode === 'private' && styles.segmentButtonSelected]}
+            style={[styles.languageButton, appMode === 'private' && styles.languageButtonSelected]}
             onPress={() => onChangeAppMode('private')}
           >
-            <Text style={[styles.segmentButtonText, appMode === 'private' && styles.segmentButtonTextSelected]}>
+            <Text style={[styles.languageButtonText, appMode === 'private' && styles.languageButtonTextSelected]}>
               {t.privateMode}
             </Text>
           </Pressable>
           <Pressable
-            style={[styles.segmentButton, appMode === 'business' && styles.segmentButtonSelected]}
+            style={[styles.languageButton, appMode === 'business' && styles.languageButtonSelected]}
             onPress={() => onChangeAppMode('business')}
           >
-            <Text style={[styles.segmentButtonText, appMode === 'business' && styles.segmentButtonTextSelected]}>
+            <Text style={[styles.languageButtonText, appMode === 'business' && styles.languageButtonTextSelected]}>
               {t.businessMode}
             </Text>
           </Pressable>
@@ -1298,12 +1386,14 @@ function ScanScreen({
 
 function ReviewScreen({
   draft,
+  duplicateCandidate,
   appMode,
   t,
   onChange,
   onSave,
 }: {
   draft: ScannedDocument;
+  duplicateCandidate: DuplicateInvoiceCandidate | null;
   appMode: AppMode;
   t: Translation;
   onChange: (document: ScannedDocument) => void;
@@ -1313,11 +1403,52 @@ function ReviewScreen({
     <ScrollView contentContainerStyle={styles.scrollContent}>
       <Text style={styles.screenTitle}>{t.reviewScan}</Text>
       <ImagePreview imageUri={draft.imageUri} t={t} />
+      {appMode === 'business' && duplicateCandidate ? (
+        <DuplicateInvoiceWarning candidate={duplicateCandidate} t={t} />
+      ) : null}
       <DocumentForm document={draft} appMode={appMode} t={t} onChange={onChange} />
       <Pressable style={styles.primaryButton} onPress={onSave}>
         <Text style={styles.primaryButtonText}>{t.save}</Text>
       </Pressable>
     </ScrollView>
+  );
+}
+
+function DuplicateInvoiceWarning({
+  candidate,
+  t,
+}: {
+  candidate: DuplicateInvoiceCandidate;
+  t: Translation;
+}) {
+  const existingDocument = candidate.document;
+  const existingDate = existingDocument.invoiceDate || existingDocument.dueDate;
+
+  return (
+    <View style={styles.duplicateWarningCard}>
+      <Text style={styles.duplicateWarningTitle}>{t.possibleDuplicateTitle}</Text>
+      <Text style={styles.duplicateWarningText}>{t.possibleDuplicateText}</Text>
+      <DuplicateComparisonRow
+        label={t.duplicateExistingSupplier}
+        value={getSupplierName(existingDocument, t.unknownSupplier)}
+      />
+      <DuplicateComparisonRow label={t.duplicateExistingAmount} value={existingDocument.amountTotal} />
+      <DuplicateComparisonRow label={t.duplicateExistingInvoiceNumber} value={existingDocument.invoiceNumber} />
+      <DuplicateComparisonRow label={t.duplicateExistingDate} value={existingDate} />
+      <DuplicateComparisonRow
+        label={t.duplicateExistingPaymentStatus}
+        value={getPaymentStatusLabel(t, existingDocument.paymentStatus)}
+      />
+    </View>
+  );
+}
+
+function DuplicateComparisonRow({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.duplicateComparisonRow}>
+      <Text style={styles.duplicateComparisonLabel}>{label}</Text>
+      <Text style={styles.duplicateComparisonValue}>{value || '-'}</Text>
+    </View>
   );
 }
 
@@ -2502,6 +2633,43 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     lineHeight: 19,
     marginTop: 8,
+  },
+  duplicateWarningCard: {
+    backgroundColor: '#fff7e8',
+    borderColor: '#d7a018',
+    borderRadius: 8,
+    borderWidth: 1,
+    marginBottom: 14,
+    padding: 14,
+  },
+  duplicateWarningTitle: {
+    color: '#6b4608',
+    fontSize: 18,
+    fontWeight: '800',
+    marginBottom: 8,
+  },
+  duplicateWarningText: {
+    color: '#6b4608',
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+    marginBottom: 10,
+  },
+  duplicateComparisonRow: {
+    borderTopColor: '#eed5b5',
+    borderTopWidth: 1,
+    paddingVertical: 8,
+  },
+  duplicateComparisonLabel: {
+    color: '#7a5a12',
+    fontSize: 12,
+    fontWeight: '800',
+    marginBottom: 3,
+  },
+  duplicateComparisonValue: {
+    color: '#153433',
+    fontSize: 15,
+    fontWeight: '700',
   },
   paymentPreparationPanel: {
     backgroundColor: '#ffffff',
