@@ -15,7 +15,9 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Clipboard from 'expo-clipboard';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as ImagePicker from 'expo-image-picker';
+import * as Sharing from 'expo-sharing';
 import QRCode from 'react-native-qrcode-svg';
 import {
   defaultLanguage,
@@ -99,11 +101,13 @@ type SupplierSummary = {
 type BusinessPayablesDashboard = {
   overdue: ScannedDocument[];
   dueToday: ScannedDocument[];
-  dueThisWeek: ScannedDocument[];
+  dueSoon: ScannedDocument[];
   openSupplierInvoices: ScannedDocument[];
   paidThisMonth: ScannedDocument[];
   supplierSummaries: SupplierSummary[];
 };
+
+type BusinessDueDateReminderState = 'dueSoon' | 'dueToday' | 'overdue';
 
 type DuplicateInvoiceCandidate = {
   document: ScannedDocument;
@@ -306,10 +310,11 @@ const isAppMode = (value: string | null): value is AppMode =>
   typeof value === 'string' && appModeValues.includes(value as AppMode);
 
 const isBusinessSupplierInvoice = (document: ScannedDocument) =>
-  document.cashflowType === 'payable' && document.documentType !== 'payment_proof';
+  document.appMode === 'business' && document.cashflowType === 'payable' && document.documentType !== 'payment_proof';
 
 const asBusinessSupplierInvoice = (document: ScannedDocument): ScannedDocument => ({
   ...document,
+  appMode: 'business',
   documentType: document.documentType === 'unknown' ? 'invoice' : document.documentType,
   cashflowType: 'payable',
   isExpense: true,
@@ -451,6 +456,52 @@ const formatEuro = (value: number) =>
     currency: 'EUR',
   }).format(value);
 
+const getDocumentAccountingMonthValue = (document: ScannedDocument) =>
+  document.invoiceDate || document.createdAt.slice(0, 10);
+
+const accountantCsvHeaders = [
+  'Lieferant',
+  'Gläubiger',
+  'Rechnungsnummer',
+  'Rechnungsdatum',
+  'Fälligkeitsdatum',
+  'Betrag',
+  'Kategorie',
+  'Zahlungsstatus',
+  'Bezahlt am',
+  'IBAN',
+  'Verwendungszweck',
+];
+
+const escapeCsvCell = (value: string) => {
+  const normalizedValue = value.replace(/\r?\n/g, ' ').trim();
+  return /[";\n\r]/.test(normalizedValue) ? `"${normalizedValue.replace(/"/g, '""')}"` : normalizedValue;
+};
+
+const createAccountantCsv = (documents: ScannedDocument[]) => {
+  const exportTranslation = translations.de;
+  const rows = documents
+    .slice()
+    .sort((a, b) => getDocumentAccountingMonthValue(a).localeCompare(getDocumentAccountingMonthValue(b)) || sortByDateDesc(a, b))
+    .map((document) => [
+      getSupplierName(document, exportTranslation.unknownSupplier),
+      document.creditorName,
+      document.invoiceNumber,
+      document.invoiceDate,
+      document.dueDate,
+      document.amountTotal,
+      getExpenseCategoryLabel(exportTranslation, document.expenseCategory),
+      getPaymentStatusLabel(exportTranslation, document.paymentStatus),
+      document.paidDate,
+      formatIbanForDisplay(document.iban),
+      getPaymentReference(document),
+    ]);
+
+  return `\uFEFF${[accountantCsvHeaders, ...rows]
+    .map((row) => row.map((cell) => escapeCsvCell(String(cell ?? ''))).join(';'))
+    .join('\n')}`;
+};
+
 const formatCardAmount = (value: string) =>
   value
     .replace(/\bEuro\b/gi, '€')
@@ -533,6 +584,44 @@ const addDaysToIsoDate = (isoDate: string, days: number) => {
   return date.toISOString().slice(0, 10);
 };
 
+const getIsoDateValue = (value: string) => {
+  if (!value) {
+    return null;
+  }
+
+  const trimmedValue = value.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmedValue)) {
+    return trimmedValue;
+  }
+
+  const date = new Date(trimmedValue);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
+};
+
+const getBusinessDueDateReminderState = (document: ScannedDocument): BusinessDueDateReminderState | null => {
+  if (!isBusinessSupplierInvoice(document) || !openSupplierPayableStatuses.has(document.paymentStatus)) {
+    return null;
+  }
+
+  const dueDate = getIsoDateValue(document.dueDate);
+  if (!dueDate) {
+    return null;
+  }
+
+  const today = todayIsoDate();
+  if (dueDate < today) {
+    return 'overdue';
+  }
+  if (dueDate === today) {
+    return 'dueToday';
+  }
+  if (dueDate <= addDaysToIsoDate(today, 3)) {
+    return 'dueSoon';
+  }
+
+  return null;
+};
+
 const getDateDistanceInDays = (a: string, b: string) => {
   if (!a || !b) {
     return Number.POSITIVE_INFINITY;
@@ -591,8 +680,6 @@ const sortByDueDateAsc = (a: ScannedDocument, b: ScannedDocument) => {
 };
 
 const getBusinessPayablesDashboard = (documents: ScannedDocument[], unknownSupplier: string): BusinessPayablesDashboard => {
-  const today = todayIsoDate();
-  const inSevenDays = addDaysToIsoDate(today, 7);
   const supplierInvoices = documents.filter(isBusinessSupplierInvoice);
   const openSupplierInvoices = supplierInvoices
     .filter((document) => openSupplierPayableStatuses.has(document.paymentStatus))
@@ -620,11 +707,9 @@ const getBusinessPayablesDashboard = (documents: ScannedDocument[], unknownSuppl
   });
 
   return {
-    overdue: openSupplierInvoices.filter((document) => Boolean(document.dueDate) && document.dueDate < today),
-    dueToday: openSupplierInvoices.filter((document) => document.dueDate === today),
-    dueThisWeek: openSupplierInvoices.filter(
-      (document) => Boolean(document.dueDate) && document.dueDate > today && document.dueDate <= inSevenDays,
-    ),
+    overdue: openSupplierInvoices.filter((document) => getBusinessDueDateReminderState(document) === 'overdue'),
+    dueToday: openSupplierInvoices.filter((document) => getBusinessDueDateReminderState(document) === 'dueToday'),
+    dueSoon: openSupplierInvoices.filter((document) => getBusinessDueDateReminderState(document) === 'dueSoon'),
     openSupplierInvoices,
     paidThisMonth,
     supplierSummaries: Array.from(summaries.values()).sort((a, b) => {
@@ -685,6 +770,7 @@ export default function App() {
   const [selectedImageUri, setSelectedImageUri] = useState<string | null>(null);
   const [selectedDocument, setSelectedDocument] = useState<ScannedDocument | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isExportingAccountantCsv, setIsExportingAccountantCsv] = useState(false);
   const [isSavingStatus, setIsSavingStatus] = useState(false);
   const [backendStatus, setBackendStatus] = useState<BackendStatus | null>(null);
   const [language, setLanguage] = useState<Language>(defaultLanguage);
@@ -813,12 +899,54 @@ export default function App() {
   const saveDocument = async (document: ScannedDocument) => {
     const savedDocument = await upsertDocument({
       ...document,
+      appMode: document.appMode ?? appMode,
       imageUri: storeDocumentImages ? document.imageUri : '',
     });
     setDraft(null);
     setSelectedDocument(savedDocument);
     await loadDocuments();
     setScreen('detail');
+  };
+
+  const exportAccountantCsv = async () => {
+    if (appMode !== 'business' || isExportingAccountantCsv) {
+      return;
+    }
+
+    const businessDocuments = documents.filter(isBusinessSupplierInvoice);
+    if (businessDocuments.length === 0) {
+      Alert.alert(t.exportForAccountant, t.noBusinessDocuments);
+      return;
+    }
+
+    setIsExportingAccountantCsv(true);
+    try {
+      const isSharingAvailable = await Sharing.isAvailableAsync();
+      if (!isSharingAvailable) {
+        Alert.alert(t.exportForAccountant, t.exportUnavailable);
+        return;
+      }
+
+      const csv = createAccountantCsv(businessDocuments);
+      const fileName = `rechnungguard-steuerberater-${new Date().toISOString().slice(0, 10)}.csv`;
+      const directory = FileSystem.cacheDirectory || FileSystem.documentDirectory;
+      if (!directory) {
+        Alert.alert(t.exportForAccountant, t.exportFailed);
+        return;
+      }
+
+      const fileUri = `${directory}${fileName}`;
+      await FileSystem.writeAsStringAsync(fileUri, csv, { encoding: FileSystem.EncodingType.UTF8 });
+      await Sharing.shareAsync(fileUri, {
+        dialogTitle: t.exportForAccountant,
+        mimeType: 'text/csv',
+        UTI: 'public.comma-separated-values-text',
+      });
+    } catch (error) {
+      Alert.alert(t.exportForAccountant, t.exportFailed);
+    } finally {
+      setIsExportingAccountantCsv(false);
+    }
   };
 
   const confirmAction = (title: string, message: string) =>
@@ -995,9 +1123,11 @@ export default function App() {
             businessPayablesDashboard={businessPayablesDashboard}
             appMode={appMode}
             language={language}
+            isExportingAccountantCsv={isExportingAccountantCsv}
             t={t}
             onChangeAppMode={changeAppMode}
             onChangeLanguage={changeLanguage}
+            onExportAccountantCsv={exportAccountantCsv}
             onScan={() => {
               setSelectedImageUri(null);
               setDraft(null);
@@ -1043,6 +1173,7 @@ export default function App() {
             onSave={async (document) => {
               const savedDocument = await upsertDocument({
                 ...document,
+                appMode: document.appMode ?? appMode,
                 imageUri: storeDocumentImages ? document.imageUri : '',
               });
               setSelectedDocument(savedDocument);
@@ -1076,9 +1207,11 @@ function HomeScreen({
   businessPayablesDashboard,
   appMode,
   language,
+  isExportingAccountantCsv,
   t,
   onChangeAppMode,
   onChangeLanguage,
+  onExportAccountantCsv,
   onScan,
   onOpenDocument,
 }: {
@@ -1090,9 +1223,11 @@ function HomeScreen({
   businessPayablesDashboard: BusinessPayablesDashboard;
   appMode: AppMode;
   language: Language;
+  isExportingAccountantCsv: boolean;
   t: Translation;
   onChangeAppMode: (appMode: AppMode) => void;
   onChangeLanguage: (language: Language) => void;
+  onExportAccountantCsv: () => void;
   onScan: () => void;
   onOpenDocument: (document: ScannedDocument) => void;
 }) {
@@ -1164,6 +1299,19 @@ function HomeScreen({
       </Pressable>
 
       {appMode === 'business' ? (
+        <View>
+          <Pressable
+            disabled={isExportingAccountantCsv}
+            style={[styles.secondaryFullButton, isExportingAccountantCsv && styles.disabledButton]}
+            onPress={onExportAccountantCsv}
+          >
+            <Text style={styles.secondaryFullButtonText}>{t.exportForAccountant}</Text>
+          </Pressable>
+          <Text style={styles.settingHint}>{t.accountantExportHelperText}</Text>
+        </View>
+      ) : null}
+
+      {appMode === 'business' ? (
         <BusinessPayablesSections
           dashboard={businessPayablesDashboard}
           t={t}
@@ -1227,6 +1375,7 @@ function BusinessPayablesSections({
 }) {
   return (
     <>
+      <BusinessDueDateSummaryCard dashboard={dashboard} t={t} />
       <BusinessDocumentSection
         title={t.overdue}
         documents={dashboard.overdue}
@@ -1242,8 +1391,8 @@ function BusinessPayablesSections({
         onOpenDocument={onOpenDocument}
       />
       <BusinessDocumentSection
-        title={t.dueThisWeek}
-        documents={dashboard.dueThisWeek}
+        title={t.dueSoon}
+        documents={dashboard.dueSoon}
         t={t}
         onOpenDocument={onOpenDocument}
       />
@@ -1261,6 +1410,25 @@ function BusinessPayablesSections({
         onOpenDocument={onOpenDocument}
       />
     </>
+  );
+}
+
+function BusinessDueDateSummaryCard({ dashboard, t }: { dashboard: BusinessPayablesDashboard; t: Translation }) {
+  return (
+    <View style={styles.businessDueDateSummaryCard}>
+      <Text style={styles.businessDueDateSummaryTitle}>{t.businessDueDateSummaryTitle}</Text>
+      <View style={styles.businessDueDateSummaryGrid}>
+        <Text style={styles.businessDueDateSummaryItem}>
+          {t.dueToday}: {dashboard.dueToday.length}
+        </Text>
+        <Text style={styles.businessDueDateSummaryItem}>
+          {t.dueSoonSummary}: {dashboard.dueSoon.length}
+        </Text>
+        <Text style={styles.businessDueDateSummaryItem}>
+          {t.overdue}: {dashboard.overdue.length}
+        </Text>
+      </View>
+    </View>
   );
 }
 
@@ -1473,6 +1641,9 @@ function DetailScreen({
   onUpdateStatus: (status: Extract<PaymentStatus, 'expected' | 'paid' | 'received' | 'disputed' | 'closed'>) => Promise<void>;
   onSave: (document: ScannedDocument) => Promise<void>;
 }) {
+  const businessDueDateReminderState =
+    appMode === 'business' ? getBusinessDueDateReminderState(document) : null;
+
   const updateAndSave = async (updates: Partial<ScannedDocument>) => {
     const nextDocument = { ...document, ...updates };
     onChange(nextDocument);
@@ -1524,6 +1695,12 @@ function DetailScreen({
       ) : null}
 
       {isReminderOrInkassoDocument(document) ? <DebtRiskCard document={document} t={t} /> : null}
+
+      {businessDueDateReminderState ? (
+        <Text style={styles.businessReminderWarning}>
+          {t.businessDueDateReminderWarnings[businessDueDateReminderState]}
+        </Text>
+      ) : null}
 
       <Text style={styles.inputLabel}>{t.paymentNote}</Text>
       <TextInput
@@ -2084,6 +2261,23 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
   },
+  secondaryFullButton: {
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    borderColor: '#0d5c63',
+    borderRadius: 8,
+    borderWidth: 1,
+    justifyContent: 'center',
+    marginBottom: 12,
+    minHeight: 48,
+    paddingHorizontal: 16,
+  },
+  secondaryFullButtonText: {
+    color: '#0d5c63',
+    fontSize: 15,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
   disabledButton: {
     opacity: 0.65,
   },
@@ -2421,6 +2615,28 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
   },
+  businessDueDateSummaryCard: {
+    backgroundColor: '#fff7e8',
+    borderColor: '#d58a36',
+    borderRadius: 8,
+    borderWidth: 1,
+    marginTop: 18,
+    padding: 12,
+  },
+  businessDueDateSummaryTitle: {
+    color: '#6b4608',
+    fontSize: 15,
+    fontWeight: '800',
+    marginBottom: 8,
+  },
+  businessDueDateSummaryGrid: {
+    gap: 6,
+  },
+  businessDueDateSummaryItem: {
+    color: '#153433',
+    fontSize: 14,
+    fontWeight: '800',
+  },
   previewFrame: {
     alignItems: 'center',
     alignSelf: 'stretch',
@@ -2702,6 +2918,17 @@ const styles = StyleSheet.create({
     color: '#6b4608',
     fontSize: 14,
     fontWeight: '800',
+    padding: 12,
+  },
+  businessReminderWarning: {
+    backgroundColor: '#fff7e8',
+    borderColor: '#d58a36',
+    borderRadius: 8,
+    borderWidth: 1,
+    color: '#6b4608',
+    fontSize: 14,
+    fontWeight: '800',
+    marginBottom: 14,
     padding: 12,
   },
   sepaQrSection: {

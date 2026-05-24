@@ -20,6 +20,7 @@ const reminderOffsets: Array<{ key: DueDateReminderKey; daysBefore: number }> = 
 ];
 
 const reminderEligibleStatuses = new Set<PaymentStatus>(['needs_review', 'unpaid']);
+const businessReminderEligibleStatuses = new Set<PaymentStatus>(['needs_review', 'unpaid', 'disputed']);
 
 let notificationsModule: NotificationsModule | null = null;
 let notificationHandlerConfigured = false;
@@ -75,8 +76,13 @@ const getNotifications = (): NotificationsModule | null => {
   }
 };
 
-export const shouldHaveDueDateReminders = (document: Pick<ScannedDocument, 'dueDate' | 'paymentStatus' | 'cashflowType'>) =>
-  document.cashflowType === 'payable' && Boolean(document.dueDate) && reminderEligibleStatuses.has(document.paymentStatus);
+export const shouldHaveDueDateReminders = (
+  document: Pick<ScannedDocument, 'dueDate' | 'paymentStatus' | 'cashflowType' | 'appMode'>,
+) => {
+  const eligibleStatuses =
+    document.appMode === 'business' ? businessReminderEligibleStatuses : reminderEligibleStatuses;
+  return document.cashflowType === 'payable' && Boolean(document.dueDate) && eligibleStatuses.has(document.paymentStatus);
+};
 
 const parseDueDate = (dueDate: string) => {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dueDate.trim());

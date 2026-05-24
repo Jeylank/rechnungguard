@@ -115,6 +115,7 @@ export type ScannedDocument = {
   taxRelevant: boolean;
   reimbursable: boolean;
   cashflowType: CashflowType;
+  appMode?: AppMode;
   ocrSource: OcrSource;
   riskNote: string;
   actionRecommendation: string;
