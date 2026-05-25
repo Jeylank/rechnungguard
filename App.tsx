@@ -102,23 +102,35 @@ type BusinessPayablesDashboard = {
   overdue: ScannedDocument[];
   dueToday: ScannedDocument[];
   dueSoon: ScannedDocument[];
+  upcoming: ScannedDocument[];
   openSupplierInvoices: ScannedDocument[];
   paidThisMonth: ScannedDocument[];
   supplierSummaries: SupplierSummary[];
 };
 
-type BusinessDueDateReminderState = 'dueSoon' | 'dueToday' | 'overdue';
+type DueDateReminderState = 'overdue' | 'dueToday' | 'dueSoon' | 'upcoming';
+type DueDateReminderSummary = Record<DueDateReminderState, ScannedDocument[]>;
 
 type DuplicateInvoiceCandidate = {
   document: ScannedDocument;
   strength: 'strong' | 'possible';
 };
+type SupplierCategorySuggestion = {
+  category: ExpenseCategory;
+};
+type PaymentDataWarningKey =
+  | 'missingRecipient'
+  | 'missingAmount'
+  | 'missingIban'
+  | 'missingPaymentReference'
+  | 'missingDueDate';
 
 const unpaidStatuses = new Set(['needs_review', 'unpaid', 'sent_to_insurance', 'waiting_reimbursement']);
 const openExpenseStatuses = new Set<ScannedDocument['paymentStatus']>(['needs_review', 'unpaid']);
 const openSupplierPayableStatuses = new Set<ScannedDocument['paymentStatus']>(['needs_review', 'unpaid', 'disputed']);
 const receivableOpenStatuses = new Set<ScannedDocument['paymentStatus']>(['needs_review', 'expected', 'waiting_reimbursement']);
 const blockedPaymentPreparationStatuses = new Set<ScannedDocument['paymentStatus']>(['paid', 'closed']);
+const paymentDataWarningStatuses = new Set<ScannedDocument['paymentStatus']>(['needs_review', 'unpaid', 'disputed']);
 const LANGUAGE_STORAGE_KEY = 'rechnungguard.language.v1';
 const APP_MODE_STORAGE_KEY = 'rechnungguard.appMode.v1';
 const PRIVACY_NOTICE_ACCEPTED_STORAGE_KEY = 'rechnungguard.privacyNoticeAccepted.v1';
@@ -255,9 +267,33 @@ const normalizeMatchText = (value?: string) =>
     .replace(/\s+/g, ' ');
 
 const getSupplierMatchNames = (document: ScannedDocument) =>
-  [document.supplierName, document.creditorName]
+  [document.supplierName, document.creditorName, document.senderName]
     .map(normalizeMatchText)
     .filter((value): value is string => value.length > 0);
+
+const normalizeSupplierMemoryName = (value?: string) =>
+  (value ?? '')
+    .toLowerCase()
+    .replace(/\b(gmbh|ug|ag|e\.?\s*k\.?|kg|ohg|ltd)\b/g, ' ')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const getSupplierMemoryNames = (document: ScannedDocument) =>
+  [document.supplierName, document.creditorName, document.senderName]
+    .map(normalizeSupplierMemoryName)
+    .filter((value): value is string => value.length > 0);
+
+const hasSupplierMemoryMatch = (a: ScannedDocument, b: ScannedDocument) => {
+  const aNames = getSupplierMemoryNames(a);
+  const bNames = new Set(getSupplierMemoryNames(b));
+  return aNames.some((name) => bNames.has(name));
+};
+
+const hasSuggestibleExpenseCategory = (document: ScannedDocument) =>
+  !document.expenseCategory ||
+  document.expenseCategory === 'other' ||
+  normalizeMatchText(document.expenseCategory) === 'sonstiges';
 
 const hasSameSupplierOrCreditor = (a: ScannedDocument, b: ScannedDocument) => {
   const aNames = getSupplierMatchNames(a);
@@ -338,10 +374,33 @@ const mentionsMahnbescheid = (document: ScannedDocument) =>
   ].some((value) => typeof value === 'string' && /mahnbescheid/i.test(value));
 
 const getPaymentRecipient = (document: ScannedDocument) =>
-  document.paymentRecipient || document.creditorName || document.senderName || '';
+  document.paymentRecipient || document.creditorName || document.supplierName || document.senderName || '';
+
+const normalizePaymentReferenceValue = (value: string) =>
+  value.replace(/ertragsnummer/gi, 'Vertragsnummer');
+
+const normalizeDocumentPaymentReference = (document: ScannedDocument): ScannedDocument => ({
+  ...document,
+  paymentReference: normalizePaymentReferenceValue(document.paymentReference),
+});
 
 const getPaymentReference = (document: ScannedDocument) =>
-  document.paymentReference || document.invoiceNumber || document.customerNumber || '';
+  normalizePaymentReferenceValue(document.paymentReference || document.invoiceNumber || document.customerNumber || '');
+
+const isPaymentReferenceSuspicious = (value: string) => {
+  const normalizedValue = value.trim().toLowerCase();
+  if (!normalizedValue) {
+    return false;
+  }
+
+  return [
+    'ihre belegnr',
+    'aus der obigen liste',
+    'verwendungszweck',
+    'bitte angeben',
+    'ertragsnummer',
+  ].some((phrase) => normalizedValue.includes(phrase));
+};
 
 const normalizeQrText = (value: string, maxLength: number) =>
   value.replace(/[\r\n]+/g, ' ').trim().slice(0, maxLength);
@@ -375,7 +434,7 @@ const canPreparePayment = (document: ScannedDocument) => {
     return false;
   }
 
-  return Boolean(document.amountTotal);
+  return true;
 };
 
 const canGenerateSepaQr = (document: ScannedDocument) => {
@@ -455,6 +514,34 @@ const formatEuro = (value: number) =>
     style: 'currency',
     currency: 'EUR',
   }).format(value);
+
+const shouldValidatePaymentData = (document: ScannedDocument) => {
+  if (document.documentType === 'payment_proof') {
+    return false;
+  }
+
+  if (document.cashflowType !== 'payable' && document.cashflowType !== 'unknown') {
+    return false;
+  }
+
+  return paymentDataWarningStatuses.has(document.paymentStatus);
+};
+
+const getPaymentDataWarningKeys = (document: ScannedDocument): PaymentDataWarningKey[] => {
+  if (!shouldValidatePaymentData(document)) {
+    return [];
+  }
+
+  return [
+    !getPaymentRecipient(document).trim() ? 'missingRecipient' : null,
+    parseAmount(document.amountTotal) <= 0 ? 'missingAmount' : null,
+    !document.iban.trim() ? 'missingIban' : null,
+    !document.paymentReference.trim() || isPaymentReferenceSuspicious(document.paymentReference)
+      ? 'missingPaymentReference'
+      : null,
+    !document.dueDate.trim() ? 'missingDueDate' : null,
+  ].filter(Boolean) as PaymentDataWarningKey[];
+};
 
 const getDocumentAccountingMonthValue = (document: ScannedDocument) =>
   document.invoiceDate || document.createdAt.slice(0, 10);
@@ -576,12 +663,20 @@ const getExpenseSummary = (documents: ScannedDocument[], appMode: AppMode): Expe
   );
 };
 
-const todayIsoDate = () => new Date().toISOString().slice(0, 10);
+const formatLocalIsoDate = (date: Date) => {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, '0');
+  const day = `${date.getDate()}`.padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const todayIsoDate = () => formatLocalIsoDate(new Date());
 
 const addDaysToIsoDate = (isoDate: string, days: number) => {
-  const date = new Date(`${isoDate}T00:00:00`);
+  const [year, month, day] = isoDate.split('-').map(Number);
+  const date = new Date(year, month - 1, day);
   date.setDate(date.getDate() + days);
-  return date.toISOString().slice(0, 10);
+  return formatLocalIsoDate(date);
 };
 
 const getIsoDateValue = (value: string) => {
@@ -598,8 +693,18 @@ const getIsoDateValue = (value: string) => {
   return Number.isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
 };
 
-const getBusinessDueDateReminderState = (document: ScannedDocument): BusinessDueDateReminderState | null => {
-  if (!isBusinessSupplierInvoice(document) || !openSupplierPayableStatuses.has(document.paymentStatus)) {
+const createEmptyDueDateReminderSummary = (): DueDateReminderSummary => ({
+  overdue: [],
+  dueToday: [],
+  dueSoon: [],
+  upcoming: [],
+});
+
+const getDueDateReminderState = (document: ScannedDocument): DueDateReminderState | null => {
+  if (
+    (document.cashflowType !== 'payable' && document.cashflowType !== 'unknown') ||
+    !openSupplierPayableStatuses.has(document.paymentStatus)
+  ) {
     return null;
   }
 
@@ -618,9 +723,21 @@ const getBusinessDueDateReminderState = (document: ScannedDocument): BusinessDue
   if (dueDate <= addDaysToIsoDate(today, 3)) {
     return 'dueSoon';
   }
+  if (dueDate <= addDaysToIsoDate(today, 7)) {
+    return 'upcoming';
+  }
 
   return null;
 };
+
+const getDueDateReminderSummary = (documents: ScannedDocument[]): DueDateReminderSummary =>
+  documents.reduce<DueDateReminderSummary>((summary, document) => {
+    const state = getDueDateReminderState(document);
+    if (state) {
+      summary[state].push(document);
+    }
+    return summary;
+  }, createEmptyDueDateReminderSummary());
 
 const getDateDistanceInDays = (a: string, b: string) => {
   if (!a || !b) {
@@ -642,18 +759,25 @@ const hasCloseInvoiceDate = (a: ScannedDocument, b: ScannedDocument) =>
 const hasCloseDueDate = (a: ScannedDocument, b: ScannedDocument) =>
   getDateDistanceInDays(a.dueDate, b.dueDate) <= 7;
 
+const getEffectiveAppMode = (document: ScannedDocument): AppMode => document.appMode ?? 'private';
+
 const getDuplicateInvoiceCandidate = (
   draft: ScannedDocument | null,
   documents: ScannedDocument[],
 ): DuplicateInvoiceCandidate | null => {
-  if (!draft || !isBusinessSupplierInvoice(draft)) {
+  if (!draft) {
     return null;
   }
 
+  const draftMode = getEffectiveAppMode(draft);
   let possibleCandidate: DuplicateInvoiceCandidate | null = null;
 
   for (const document of documents) {
-    if (document.id === draft.id || !isBusinessSupplierInvoice(document) || !hasSameSupplierOrCreditor(draft, document)) {
+    if (
+      document.id === draft.id ||
+      getEffectiveAppMode(document) !== draftMode ||
+      !hasSameSupplierOrCreditor(draft, document)
+    ) {
       continue;
     }
 
@@ -668,6 +792,29 @@ const getDuplicateInvoiceCandidate = (
   }
 
   return possibleCandidate;
+};
+
+const getSupplierCategorySuggestion = (
+  draft: ScannedDocument,
+  documents: ScannedDocument[],
+  appMode: AppMode,
+): SupplierCategorySuggestion | null => {
+  if (appMode !== 'business' || !hasSuggestibleExpenseCategory(draft)) {
+    return null;
+  }
+
+  const categoryValues = new Set(getExpenseCategoryValuesForMode(appMode));
+  const matchingDocument = documents
+    .filter((document) =>
+      document.id !== draft.id &&
+      getEffectiveAppMode(document) === appMode &&
+      document.expenseCategory !== 'other' &&
+      categoryValues.has(document.expenseCategory) &&
+      hasSupplierMemoryMatch(draft, document),
+    )
+    .sort(sortByDateDesc)[0];
+
+  return matchingDocument ? { category: matchingDocument.expenseCategory } : null;
 };
 
 const sortByDueDateAsc = (a: ScannedDocument, b: ScannedDocument) => {
@@ -707,9 +854,7 @@ const getBusinessPayablesDashboard = (documents: ScannedDocument[], unknownSuppl
   });
 
   return {
-    overdue: openSupplierInvoices.filter((document) => getBusinessDueDateReminderState(document) === 'overdue'),
-    dueToday: openSupplierInvoices.filter((document) => getBusinessDueDateReminderState(document) === 'dueToday'),
-    dueSoon: openSupplierInvoices.filter((document) => getBusinessDueDateReminderState(document) === 'dueSoon'),
+    ...getDueDateReminderSummary(openSupplierInvoices),
     openSupplierInvoices,
     paidThisMonth,
     supplierSummaries: Array.from(summaries.values()).sort((a, b) => {
@@ -767,6 +912,7 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>('home');
   const [documents, setDocuments] = useState<ScannedDocument[]>([]);
   const [draft, setDraft] = useState<ScannedDocument | null>(null);
+  const [supplierCategorySuggestion, setSupplierCategorySuggestion] = useState<SupplierCategorySuggestion | null>(null);
   const [selectedImageUri, setSelectedImageUri] = useState<string | null>(null);
   const [selectedDocument, setSelectedDocument] = useState<ScannedDocument | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -846,9 +992,13 @@ export default function App() {
 
   const recentDocuments = useMemo(() => homeDocuments.slice().sort(sortByDateDesc).slice(0, 8), [homeDocuments]);
   const expenseSummary = useMemo(() => getExpenseSummary(documents, appMode), [appMode, documents]);
+  const privateDueDateReminderSummary = useMemo(
+    () => getDueDateReminderSummary(appMode === 'private' ? homeDocuments : []),
+    [appMode, homeDocuments],
+  );
   const duplicateInvoiceCandidate = useMemo(
-    () => (appMode === 'business' ? getDuplicateInvoiceCandidate(draft, documents) : null),
-    [appMode, documents, draft],
+    () => getDuplicateInvoiceCandidate(draft, documents),
+    [documents, draft],
   );
   const businessPayablesDashboard = useMemo(
     () => getBusinessPayablesDashboard(documents, t.unknownSupplier),
@@ -896,13 +1046,34 @@ export default function App() {
     setScreen('detail');
   };
 
+  const changeDraft = (nextDraft: ScannedDocument) => {
+    if (
+      supplierCategorySuggestion &&
+      draft &&
+      nextDraft.expenseCategory !== draft.expenseCategory &&
+      nextDraft.expenseCategory !== supplierCategorySuggestion.category
+    ) {
+      setSupplierCategorySuggestion(null);
+    } else if (!supplierCategorySuggestion && (!draft || nextDraft.expenseCategory === draft.expenseCategory)) {
+      const categorySuggestion = getSupplierCategorySuggestion(nextDraft, documents, appMode);
+      if (categorySuggestion) {
+        setSupplierCategorySuggestion(categorySuggestion);
+        setDraft({ ...nextDraft, expenseCategory: categorySuggestion.category });
+        return;
+      }
+    }
+
+    setDraft(nextDraft);
+  };
+
   const saveDocument = async (document: ScannedDocument) => {
     const savedDocument = await upsertDocument({
-      ...document,
+      ...normalizeDocumentPaymentReference(document),
       appMode: document.appMode ?? appMode,
       imageUri: storeDocumentImages ? document.imageUri : '',
     });
     setDraft(null);
+    setSupplierCategorySuggestion(null);
     setSelectedDocument(savedDocument);
     await loadDocuments();
     setScreen('detail');
@@ -996,6 +1167,7 @@ export default function App() {
     ]);
     setDocuments([]);
     setDraft(null);
+    setSupplierCategorySuggestion(null);
     setSelectedDocument(null);
     setSelectedImageUri(null);
     setLanguage(defaultLanguage);
@@ -1075,6 +1247,7 @@ export default function App() {
     }
 
     setDraft(null);
+    setSupplierCategorySuggestion(null);
     setIsLoading(true);
     try {
       try {
@@ -1082,14 +1255,22 @@ export default function App() {
         if (OCR_MODE === 'backend' && scannedDocument.ocrSource !== 'backend') {
           throw new Error('Backend OCR mode did not return backend data.');
         }
-        const document = appMode === 'business' ? asBusinessSupplierInvoice(scannedDocument) : scannedDocument;
+        const document = normalizeDocumentPaymentReference(
+          appMode === 'business' ? asBusinessSupplierInvoice(scannedDocument) : scannedDocument,
+        );
+        const categorySuggestion = getSupplierCategorySuggestion(document, documents, appMode);
+        const documentWithSuggestion = categorySuggestion
+          ? { ...document, expenseCategory: categorySuggestion.category }
+          : document;
+        setSupplierCategorySuggestion(categorySuggestion);
         setDraft({
-          ...document,
-          imageUri: storeDocumentImages ? document.imageUri : '',
+          ...documentWithSuggestion,
+          imageUri: storeDocumentImages ? documentWithSuggestion.imageUri : '',
         });
         setScreen('review');
       } catch (error) {
         setDraft(null);
+        setSupplierCategorySuggestion(null);
         setScreen('scan');
         Alert.alert(t.ocrFailedTitle, t.ocrFailedManualReview);
       }
@@ -1120,6 +1301,7 @@ export default function App() {
             expectedReimbursementDocuments={expectedReimbursementDocuments}
             recentDocuments={recentDocuments}
             expenseSummary={expenseSummary}
+            privateDueDateReminderSummary={privateDueDateReminderSummary}
             businessPayablesDashboard={businessPayablesDashboard}
             appMode={appMode}
             language={language}
@@ -1131,6 +1313,7 @@ export default function App() {
             onScan={() => {
               setSelectedImageUri(null);
               setDraft(null);
+              setSupplierCategorySuggestion(null);
               setScreen('scan');
             }}
             onOpenDocument={openDocument}
@@ -1153,9 +1336,10 @@ export default function App() {
           <ReviewScreen
             draft={draft}
             duplicateCandidate={duplicateInvoiceCandidate}
+            categorySuggestion={supplierCategorySuggestion}
             appMode={appMode}
             t={t}
-            onChange={setDraft}
+            onChange={changeDraft}
             onSave={() => saveDocument(draft)}
           />
         ) : null}
@@ -1172,7 +1356,7 @@ export default function App() {
             onUpdateStatus={updateDocumentStatus}
             onSave={async (document) => {
               const savedDocument = await upsertDocument({
-                ...document,
+                ...normalizeDocumentPaymentReference(document),
                 appMode: document.appMode ?? appMode,
                 imageUri: storeDocumentImages ? document.imageUri : '',
               });
@@ -1204,6 +1388,7 @@ function HomeScreen({
   expectedReimbursementDocuments,
   recentDocuments,
   expenseSummary,
+  privateDueDateReminderSummary,
   businessPayablesDashboard,
   appMode,
   language,
@@ -1220,6 +1405,7 @@ function HomeScreen({
   expectedReimbursementDocuments: ScannedDocument[];
   recentDocuments: ScannedDocument[];
   expenseSummary: ExpenseSummary;
+  privateDueDateReminderSummary: DueDateReminderSummary;
   businessPayablesDashboard: BusinessPayablesDashboard;
   appMode: AppMode;
   language: Language;
@@ -1319,6 +1505,8 @@ function HomeScreen({
         />
       ) : (
         <>
+          <DueDateSummaryCard title={t.privateDueDateSummaryTitle} summary={privateDueDateReminderSummary} t={t} />
+
           {urgentDocuments.length > 0 ? (
             <>
               <SectionTitle title={t.urgentUnpaidBills} />
@@ -1375,7 +1563,7 @@ function BusinessPayablesSections({
 }) {
   return (
     <>
-      <BusinessDueDateSummaryCard dashboard={dashboard} t={t} />
+      <DueDateSummaryCard title={t.businessDueDateSummaryTitle} summary={dashboard} t={t} showUpcoming={false} />
       <BusinessDocumentSection
         title={t.overdue}
         documents={dashboard.overdue}
@@ -1413,20 +1601,35 @@ function BusinessPayablesSections({
   );
 }
 
-function BusinessDueDateSummaryCard({ dashboard, t }: { dashboard: BusinessPayablesDashboard; t: Translation }) {
+function DueDateSummaryCard({
+  title,
+  summary,
+  t,
+  showUpcoming = true,
+}: {
+  title: string;
+  summary: DueDateReminderSummary;
+  t: Translation;
+  showUpcoming?: boolean;
+}) {
   return (
     <View style={styles.businessDueDateSummaryCard}>
-      <Text style={styles.businessDueDateSummaryTitle}>{t.businessDueDateSummaryTitle}</Text>
+      <Text style={styles.businessDueDateSummaryTitle}>{title}</Text>
       <View style={styles.businessDueDateSummaryGrid}>
         <Text style={styles.businessDueDateSummaryItem}>
-          {t.dueToday}: {dashboard.dueToday.length}
+          {t.overdue}: {summary.overdue.length}
         </Text>
         <Text style={styles.businessDueDateSummaryItem}>
-          {t.dueSoonSummary}: {dashboard.dueSoon.length}
+          {t.dueToday}: {summary.dueToday.length}
         </Text>
         <Text style={styles.businessDueDateSummaryItem}>
-          {t.overdue}: {dashboard.overdue.length}
+          {t.dueSoonSummary}: {summary.dueSoon.length}
         </Text>
+        {showUpcoming ? (
+          <Text style={styles.businessDueDateSummaryItem}>
+            {t.upcomingSummary}: {summary.upcoming.length}
+          </Text>
+        ) : null}
       </View>
     </View>
   );
@@ -1555,6 +1758,7 @@ function ScanScreen({
 function ReviewScreen({
   draft,
   duplicateCandidate,
+  categorySuggestion,
   appMode,
   t,
   onChange,
@@ -1562,6 +1766,7 @@ function ReviewScreen({
 }: {
   draft: ScannedDocument;
   duplicateCandidate: DuplicateInvoiceCandidate | null;
+  categorySuggestion: SupplierCategorySuggestion | null;
   appMode: AppMode;
   t: Translation;
   onChange: (document: ScannedDocument) => void;
@@ -1571,9 +1776,13 @@ function ReviewScreen({
     <ScrollView contentContainerStyle={styles.scrollContent}>
       <Text style={styles.screenTitle}>{t.reviewScan}</Text>
       <ImagePreview imageUri={draft.imageUri} t={t} />
-      {appMode === 'business' && duplicateCandidate ? (
+      {duplicateCandidate ? (
         <DuplicateInvoiceWarning candidate={duplicateCandidate} t={t} />
       ) : null}
+      {appMode === 'business' && categorySuggestion ? (
+        <SupplierCategorySuggestionCard suggestion={categorySuggestion} t={t} />
+      ) : null}
+      <PaymentDataWarningCard document={draft} t={t} />
       <DocumentForm document={draft} appMode={appMode} t={t} onChange={onChange} />
       <Pressable style={styles.primaryButton} onPress={onSave}>
         <Text style={styles.primaryButtonText}>{t.save}</Text>
@@ -1590,7 +1799,6 @@ function DuplicateInvoiceWarning({
   t: Translation;
 }) {
   const existingDocument = candidate.document;
-  const existingDate = existingDocument.invoiceDate || existingDocument.dueDate;
 
   return (
     <View style={styles.duplicateWarningCard}>
@@ -1598,11 +1806,12 @@ function DuplicateInvoiceWarning({
       <Text style={styles.duplicateWarningText}>{t.possibleDuplicateText}</Text>
       <DuplicateComparisonRow
         label={t.duplicateExistingSupplier}
-        value={getSupplierName(existingDocument, t.unknownSupplier)}
+        value={getSupplierName(existingDocument, t.unknownSender)}
       />
       <DuplicateComparisonRow label={t.duplicateExistingAmount} value={existingDocument.amountTotal} />
       <DuplicateComparisonRow label={t.duplicateExistingInvoiceNumber} value={existingDocument.invoiceNumber} />
-      <DuplicateComparisonRow label={t.duplicateExistingDate} value={existingDate} />
+      <DuplicateComparisonRow label={t.duplicateExistingInvoiceDate} value={existingDocument.invoiceDate} />
+      <DuplicateComparisonRow label={t.duplicateExistingDueDate} value={existingDocument.dueDate} />
       <DuplicateComparisonRow
         label={t.duplicateExistingPaymentStatus}
         value={getPaymentStatusLabel(t, existingDocument.paymentStatus)}
@@ -1616,6 +1825,56 @@ function DuplicateComparisonRow({ label, value }: { label: string; value: string
     <View style={styles.duplicateComparisonRow}>
       <Text style={styles.duplicateComparisonLabel}>{label}</Text>
       <Text style={styles.duplicateComparisonValue}>{value || '-'}</Text>
+    </View>
+  );
+}
+
+function SupplierCategorySuggestionCard({
+  suggestion,
+  t,
+}: {
+  suggestion: SupplierCategorySuggestion;
+  t: Translation;
+}) {
+  return (
+    <View style={styles.categorySuggestionCard}>
+      <Text style={styles.categorySuggestionTitle}>{t.categorySuggestionTitle}</Text>
+      <Text style={styles.categorySuggestionText}>
+        {t.categorySuggestionText.replace('{category}', getExpenseCategoryLabel(t, suggestion.category))}
+      </Text>
+    </View>
+  );
+}
+
+function PaymentDataWarningCard({ document, t }: { document: ScannedDocument; t: Translation }) {
+  const warningKeys = getPaymentDataWarningKeys(document);
+  if (warningKeys.length === 0) {
+    return null;
+  }
+
+  return (
+    <View style={styles.paymentDataWarningCard}>
+      <Text style={styles.paymentDataWarningTitle}>{t.paymentDataWarningTitle}</Text>
+      <Text style={styles.paymentDataWarningText}>{t.paymentDataWarningText}</Text>
+      <View style={styles.paymentDataWarningList}>
+        {warningKeys.map((warningKey) => (
+          <Text key={warningKey} style={styles.paymentDataWarningItem}>
+            - {t.paymentDataWarningItems[warningKey]}
+          </Text>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+function DueDateReminderWarningCard({ state, t }: { state: DueDateReminderState | null; t: Translation }) {
+  if (!state) {
+    return null;
+  }
+
+  return (
+    <View style={[styles.dueDateWarningCard, state === 'upcoming' && styles.dueDateHintCard]}>
+      <Text style={styles.dueDateWarningText}>{t.dueDateReminderWarnings[state]}</Text>
     </View>
   );
 }
@@ -1641,8 +1900,7 @@ function DetailScreen({
   onUpdateStatus: (status: Extract<PaymentStatus, 'expected' | 'paid' | 'received' | 'disputed' | 'closed'>) => Promise<void>;
   onSave: (document: ScannedDocument) => Promise<void>;
 }) {
-  const businessDueDateReminderState =
-    appMode === 'business' ? getBusinessDueDateReminderState(document) : null;
+  const dueDateReminderState = getDueDateReminderState(document);
 
   const updateAndSave = async (updates: Partial<ScannedDocument>) => {
     const nextDocument = { ...document, ...updates };
@@ -1687,6 +1945,8 @@ function DetailScreen({
         <AppButton label={t.deleteDocument} disabled={isSavingStatus} onPress={onDeleteDocument} />
       </View>
 
+      <PaymentDataWarningCard document={document} t={t} />
+
       {document.cashflowType === 'receivable' ? (
         <View style={styles.receivableHighlight}>
           <Text style={styles.detailLabel}>{t.expectedReimbursement}</Text>
@@ -1696,11 +1956,7 @@ function DetailScreen({
 
       {isReminderOrInkassoDocument(document) ? <DebtRiskCard document={document} t={t} /> : null}
 
-      {businessDueDateReminderState ? (
-        <Text style={styles.businessReminderWarning}>
-          {t.businessDueDateReminderWarnings[businessDueDateReminderState]}
-        </Text>
-      ) : null}
+      <DueDateReminderWarningCard state={dueDateReminderState} t={t} />
 
       <Text style={styles.inputLabel}>{t.paymentNote}</Text>
       <TextInput
@@ -1788,12 +2044,6 @@ function PaymentPreparationScreen({
     !normalizedIban ? t.sepaQrWarnings.missingIban : null,
     !document.amountTotal || !epcAmount ? t.sepaQrWarnings.missingAmount : null,
   ].filter(Boolean) as string[];
-  const warnings = [
-    !document.iban ? t.paymentPreparationWarnings.missingIban : null,
-    !document.amountTotal ? t.paymentPreparationWarnings.missingAmount : null,
-    !paymentReference ? t.paymentPreparationWarnings.checkPaymentReference : null,
-    !recipient ? t.paymentPreparationWarnings.checkRecipient : null,
-  ].filter(Boolean) as string[];
 
   const copyValue = async (value: string, label: string) => {
     if (!value) {
@@ -1809,6 +2059,8 @@ function PaymentPreparationScreen({
       <Text style={styles.screenTitle}>{t.paymentPreparationTitle}</Text>
       <Text style={styles.paymentSafetyNote}>{t.paymentPreparationSafetyNote}</Text>
       <Text style={styles.paymentSafetyNote}>{t.sepaQrDisclaimer}</Text>
+
+      <PaymentDataWarningCard document={document} t={t} />
 
       <View style={styles.paymentPreparationPanel}>
         <PaymentPreparationRow label={t.paymentTransferLabels.recipient} value={recipient} />
@@ -1839,14 +2091,6 @@ function PaymentPreparationScreen({
           disabled={!paymentReference}
           onPress={() => copyValue(paymentReference, t.paymentTransferLabels.reference)}
         />
-      </View>
-
-      <View style={styles.warningList}>
-        {warnings.map((warning) => (
-          <Text key={warning} style={styles.warningText}>
-            {warning}
-          </Text>
-        ))}
       </View>
 
       <View style={styles.sepaQrSection}>
@@ -2886,6 +3130,74 @@ const styles = StyleSheet.create({
     color: '#153433',
     fontSize: 15,
     fontWeight: '700',
+  },
+  categorySuggestionCard: {
+    backgroundColor: '#f4f8f7',
+    borderColor: '#9ab6b1',
+    borderRadius: 8,
+    borderWidth: 1,
+    marginBottom: 14,
+    padding: 12,
+  },
+  categorySuggestionTitle: {
+    color: '#153433',
+    fontSize: 15,
+    fontWeight: '800',
+    marginBottom: 6,
+  },
+  categorySuggestionText: {
+    color: '#536260',
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  paymentDataWarningCard: {
+    backgroundColor: '#fff7e8',
+    borderColor: '#d7a018',
+    borderRadius: 8,
+    borderWidth: 1,
+    marginBottom: 14,
+    padding: 14,
+  },
+  paymentDataWarningTitle: {
+    color: '#6b4608',
+    fontSize: 18,
+    fontWeight: '800',
+    marginBottom: 8,
+  },
+  paymentDataWarningText: {
+    color: '#6b4608',
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+    marginBottom: 10,
+  },
+  paymentDataWarningList: {
+    gap: 6,
+  },
+  paymentDataWarningItem: {
+    color: '#153433',
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+  },
+  dueDateWarningCard: {
+    backgroundColor: '#fff7e8',
+    borderColor: '#d58a36',
+    borderRadius: 8,
+    borderWidth: 1,
+    marginBottom: 14,
+    padding: 12,
+  },
+  dueDateHintCard: {
+    backgroundColor: '#f4f8f7',
+    borderColor: '#9ab6b1',
+  },
+  dueDateWarningText: {
+    color: '#6b4608',
+    fontSize: 14,
+    fontWeight: '800',
+    lineHeight: 20,
   },
   paymentPreparationPanel: {
     backgroundColor: '#ffffff',
