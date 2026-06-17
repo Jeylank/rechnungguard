@@ -1305,10 +1305,13 @@ export default function App() {
             businessPayablesDashboard={businessPayablesDashboard}
             appMode={appMode}
             language={language}
+            storeDocumentImages={storeDocumentImages}
             isExportingAccountantCsv={isExportingAccountantCsv}
             t={t}
             onChangeAppMode={changeAppMode}
             onChangeLanguage={changeLanguage}
+            onChangeStoreDocumentImages={changeStoreDocumentImages}
+            onDeleteAllLocalData={deleteAllLocalData}
             onExportAccountantCsv={exportAccountantCsv}
             onScan={() => {
               setSelectedImageUri(null);
@@ -1392,10 +1395,13 @@ function HomeScreen({
   businessPayablesDashboard,
   appMode,
   language,
+  storeDocumentImages,
   isExportingAccountantCsv,
   t,
   onChangeAppMode,
   onChangeLanguage,
+  onChangeStoreDocumentImages,
+  onDeleteAllLocalData,
   onExportAccountantCsv,
   onScan,
   onOpenDocument,
@@ -1409,10 +1415,13 @@ function HomeScreen({
   businessPayablesDashboard: BusinessPayablesDashboard;
   appMode: AppMode;
   language: Language;
+  storeDocumentImages: boolean;
   isExportingAccountantCsv: boolean;
   t: Translation;
   onChangeAppMode: (appMode: AppMode) => void;
   onChangeLanguage: (language: Language) => void;
+  onChangeStoreDocumentImages: (enabled: boolean) => void;
+  onDeleteAllLocalData: () => void;
   onExportAccountantCsv: () => void;
   onScan: () => void;
   onOpenDocument: (document: ScannedDocument) => void;
@@ -1484,6 +1493,13 @@ function HomeScreen({
         <Text style={styles.primaryButtonText}>{scanLabel}</Text>
       </Pressable>
 
+      <PrivacySettingsSection
+        storeDocumentImages={storeDocumentImages}
+        t={t}
+        onChangeStoreDocumentImages={onChangeStoreDocumentImages}
+        onDeleteAllLocalData={onDeleteAllLocalData}
+      />
+
       {appMode === 'business' ? (
         <View>
           <Pressable
@@ -1549,6 +1565,42 @@ function HomeScreen({
         ))
       )}
     </ScrollView>
+  );
+}
+
+function PrivacySettingsSection({
+  storeDocumentImages,
+  t,
+  onChangeStoreDocumentImages,
+  onDeleteAllLocalData,
+}: {
+  storeDocumentImages: boolean;
+  t: Translation;
+  onChangeStoreDocumentImages: (enabled: boolean) => void;
+  onDeleteAllLocalData: () => void;
+}) {
+  return (
+    <View style={styles.privacySettings}>
+      <Text style={styles.sectionTitle}>{t.privacyNoticeTitle}</Text>
+      <Text style={styles.paymentSafetyNote}>{t.privacySummary}</Text>
+      <View style={styles.settingRow}>
+        <View style={styles.settingTextBlock}>
+          <Text style={styles.inputLabel}>{t.storeDocumentImages}</Text>
+          <Text style={styles.settingHint}>{t.storeDocumentImagesHint}</Text>
+        </View>
+        <Pressable
+          style={[styles.settingToggleButton, storeDocumentImages && styles.settingToggleButtonEnabled]}
+          onPress={() => onChangeStoreDocumentImages(!storeDocumentImages)}
+        >
+          <Text style={[styles.settingToggleButtonText, storeDocumentImages && styles.settingToggleButtonTextEnabled]}>
+            {storeDocumentImages ? t.on : t.off}
+          </Text>
+        </Pressable>
+      </View>
+      <Pressable style={styles.secondaryFullButton} onPress={onDeleteAllLocalData}>
+        <Text style={styles.secondaryFullButtonText}>{t.deleteAllLocalData}</Text>
+      </Pressable>
+    </View>
   );
 }
 
@@ -1727,6 +1779,7 @@ function ScanScreen({
     <ScrollView contentContainerStyle={styles.scanContent}>
       <Text style={styles.screenTitle}>{appMode === 'business' ? t.scanSupplierInvoice : t.scanBillOrLetter}</Text>
       {appMode === 'business' ? <Text style={styles.subtleText}>{t.businessHelperText}</Text> : null}
+      <Text style={styles.paymentSafetyNote}>{t.aiDisclaimer}</Text>
       <View style={styles.statusBadgeGroup}>
         {statusText ? <Text style={styles.modeBadge}>{statusText}</Text> : null}
       </View>
@@ -1782,6 +1835,7 @@ function ReviewScreen({
       {appMode === 'business' && categorySuggestion ? (
         <SupplierCategorySuggestionCard suggestion={categorySuggestion} t={t} />
       ) : null}
+      <Text style={styles.paymentSafetyNote}>{t.aiDisclaimer}</Text>
       <PaymentDataWarningCard document={draft} t={t} />
       <DocumentForm document={draft} appMode={appMode} t={t} onChange={onChange} />
       <Pressable style={styles.primaryButton} onPress={onSave}>
@@ -2057,6 +2111,7 @@ function PaymentPreparationScreen({
   return (
     <ScrollView contentContainerStyle={styles.scrollContent}>
       <Text style={styles.screenTitle}>{t.paymentPreparationTitle}</Text>
+      <Text style={styles.paymentSafetyNote}>{t.aiDisclaimer}</Text>
       <Text style={styles.paymentSafetyNote}>{t.paymentPreparationSafetyNote}</Text>
       <Text style={styles.paymentSafetyNote}>{t.sepaQrDisclaimer}</Text>
 

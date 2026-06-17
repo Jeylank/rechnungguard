@@ -6,16 +6,34 @@
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
       "backgroundColor": "#f7f4ee"
     },
+    "icon": "./assets/icon.png",
     "assetBundlePatterns": [
       "**/*"
     ],
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.jeylank.rechnungguard",
+      "buildNumber": "1",
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "RechnungGuard benötigt Zugriff auf Fotos, um Rechnungen und Briefe aus deiner Galerie zu scannen. RechnungGuard needs photo library access to scan invoices and letters from your gallery.",
+        "NSCameraUsageDescription": "RechnungGuard benötigt die Kamera, um Rechnungen und Briefe zu scannen. RechnungGuard needs camera access to scan invoices and letters."
+      }
     },
     "android": {
-      "package": "com.rechnungguard.app"
+      "package": "com.jeylank.rechnungguard",
+      "versionCode": 1,
+      "permissions": [
+        "READ_EXTERNAL_STORAGE",
+        "READ_MEDIA_IMAGES"
+      ],
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#f7f4ee"
+      }
     },
     "extra": {
       "eas": {
@@ -24,7 +42,14 @@
     },
     "owner": "jeylan",
     "plugins": [
-      "expo-font"
+      "expo-font",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "RechnungGuard benötigt Zugriff auf Fotos, um Rechnungen und Briefe aus deiner Galerie zu scannen. RechnungGuard needs photo library access to scan invoices and letters from your gallery.",
+          "cameraPermission": "RechnungGuard benötigt die Kamera, um Rechnungen und Briefe zu scannen. RechnungGuard needs camera access to scan invoices and letters."
+        }
+      ]
     ]
   }
 }

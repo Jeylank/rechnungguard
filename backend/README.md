@@ -2,7 +2,7 @@
 
 This backend receives document images from the Expo app and returns structured OCR fields from `POST /ocr`.
 
-It keeps OCR provider keys out of the Expo app. The default provider is still `mock`; an optional OpenAI vision provider can be enabled only on the backend.
+It keeps OCR provider keys out of the Expo app. The default provider is `openai`; the `mock` provider is only for explicit local testing.
 
 ## Install
 
@@ -31,7 +31,7 @@ OPENAI_API_KEY=
 
 ### Mock provider
 
-Mock OCR is the default and requires no API key:
+Mock OCR is available for local testing and requires no API key:
 
 ```env
 OCR_PROVIDER=mock
@@ -52,7 +52,7 @@ To test real OCR locally, put the OpenAI key in `backend/.env` only:
 
 ```env
 OCR_PROVIDER=openai
-OPENAI_API_KEY=sk-...
+OPENAI_API_KEY=your_backend_only_key
 OPENAI_OCR_MODEL=gpt-4.1-mini
 ```
 
@@ -60,7 +60,7 @@ Restart the backend after changing `.env`.
 
 Do not put `OPENAI_API_KEY` or any provider secret in the Expo app. The mobile app should only call this backend.
 
-When `OCR_PROVIDER=openai`, `POST /ocr` sends the uploaded image to the OpenAI Responses API as a vision input and asks for structured JSON matching the RechnungGuard document fields. If OpenAI fails or an unsupported provider is configured, the server logs the provider error and returns the mock OCR document as a safe fallback instead of crashing.
+When `OCR_PROVIDER=openai`, `POST /ocr` sends the uploaded image to the OpenAI Responses API as a vision input and asks for structured JSON matching the RechnungGuard document fields. If OpenAI fails or an unsupported provider is configured, the server logs a generic provider error and returns a generic OCR failure to the app.
 
 ## Expected Request
 
@@ -83,7 +83,7 @@ curl -X POST http://localhost:3001/ocr \
 
 ## Expected Response
 
-Successful responses are ScannedDocument-compatible JSON. The current mock response is:
+Successful responses are ScannedDocument-compatible JSON. For local testing only, the mock response is:
 
 ```json
 {
@@ -107,14 +107,14 @@ Successful responses are ScannedDocument-compatible JSON. The current mock respo
 }
 ```
 
-## Connect Expo Later
+## Mobile App Connection
 
-The mobile app currently keeps `OCR_MODE` set to `mock` in `services/ocrService.ts`.
+The mobile app keeps `OCR_MODE` set to `backend` in `services/ocrService.ts` and calls the Cloud Run OCR URL.
 
-When this backend is running and reachable from the phone:
+For local backend testing only:
 
-1. Set `BACKEND_OCR_URL` in `services/ocrService.ts` to the backend OCR URL, for example `http://192.168.2.104:3001/ocr`.
-2. Set `OCR_MODE` to `backend`.
+1. Set `BACKEND_OCR_URL` in `services/ocrService.ts` to the local backend OCR URL, for example `http://192.168.2.104:3001/ocr`.
+2. Keep `OCR_MODE` set to `backend`.
 3. Keep API keys only in the backend environment, never in the Expo app.
 
 For Expo Go on a physical Android device, use your computer's LAN IP address instead of `localhost`.

@@ -25,7 +25,7 @@ const upload = multer({
 });
 
 const port = Number(process.env.PORT || 3001);
-const ocrProvider = process.env.OCR_PROVIDER || 'mock';
+const ocrProvider = process.env.OCR_PROVIDER || 'openai';
 const openaiModel = process.env.OPENAI_OCR_MODEL || 'gpt-4.1-mini';
 
 const documentTypeValues = [
